@@ -1,0 +1,51 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+# Committed per-environment defaults — these must never contain secrets.
+!src/config/env/.env.development
+!src/config/env/.env.staging
+!src/config/env/.env.production
+*.pem
+*.key
+
+# logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# test / coverage
+coverage/
+.nyc_output/
+
+# generated
+.prisma/
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+
+# local docker volumes
+infra/docker/.data/
+
+# runtime scratch
+tmp/
+.cache/
+
+#docs
+docs

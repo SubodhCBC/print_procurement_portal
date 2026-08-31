@@ -1,0 +1,102 @@
+{
+  "name": "ticketit-portal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Ticket-IT B2B E-Commerce & Web-to-Print Procurement Portal — NestJS API",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "build": "nest build",
+    "start": "nest start",
+    "start:dev": "nest start --watch",
+    "start:debug": "nest start --debug --watch",
+    "start:prod": "node dist/main.js",
+    "lint": "eslint \"{src,test,scripts}/**/*.ts\"",
+    "lint:fix": "eslint \"{src,test,scripts}/**/*.ts\" --fix",
+    "format": "prettier --write \"**/*.{ts,js,json,md,yml,yaml}\"",
+    "format:check": "prettier --check \"**/*.{ts,js,json,md,yml,yaml}\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "test:e2e": "vitest run --config test/vitest-e2e.config.ts",
+    "infra:up": "docker compose -f docker/docker-compose.yml up -d",
+    "infra:down": "docker compose -f docker/docker-compose.yml down",
+    "infra:reset": "docker compose -f docker/docker-compose.yml down -v && npm run infra:up",
+    "infra:logs": "docker compose -f docker/docker-compose.yml logs -f",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:status": "prisma migrate status",
+    "db:reset": "prisma migrate reset --force",
+    "db:studio": "prisma studio",
+    "db:seed": "tsx src/database/seeds/seed.ts",
+    "clean": "rimraf dist coverage",
+    "prepare": "husky",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@fastify/compress": "^8.0.1",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/middie": "^9.0.3",
+    "@fastify/static": "^10.1.2",
+    "@nestjs/bullmq": "^11.0.1",
+    "@nestjs/common": "^11.0.5",
+    "@nestjs/core": "^11.0.5",
+    "@nestjs/platform-fastify": "^11.0.5",
+    "@nestjs/swagger": "^11.0.2",
+    "@nestjs/terminus": "^11.0.0",
+    "@nestjs/throttler": "^6.4.0",
+    "@prisma/client": "^6.2.1",
+    "@sentry/node": "^8.51.0",
+    "bullmq": "^5.34.10",
+    "dotenv": "^16.4.7",
+    "dotenv-expand": "^12.0.1",
+    "fastify": "^5.12.1",
+    "ioredis": "^5.4.2",
+    "nestjs-pino": "^4.3.0",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@nestjs/cli": "^11.0.2",
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.0.5",
+    "@swc/core": "^1.10.9",
+    "@types/node": "^22.10.7",
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^9.1.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.1",
+    "pino-pretty": "^13.0.0",
+    "prettier": "^3.4.2",
+    "prisma": "^6.2.1",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.21.0",
+    "unplugin-swc": "^1.5.1",
+    "vitest": "^2.1.8"
+  },
+  "lint-staged": {
+    "*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "overrides": {
+    "fastify": "$fastify"
+  }
+}

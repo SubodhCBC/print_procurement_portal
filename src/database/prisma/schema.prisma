@@ -1,0 +1,24 @@
+// ---------------------------------------------------------------------------
+// Ticket-IT Portal — data model
+//
+// Infrastructure scaffold only. No domain models are defined yet; they land
+// module by module (Account, Site, User, Product, RateCard, Order,
+// TemplateVersion, AuditLogEntry, OutboxEvent, WebhookDeliveryLog...).
+//
+// Conventions agreed up front, so every model that follows obeys them:
+//   * Public ids are prefixed strings from @ticketit/shared (createId).
+//   * Money is NUMERIC(12,2) via @db.Decimal(12, 2) — never Float.
+//   * Timestamps are @db.Timestamptz(3); the database stores UTC.
+//   * Tenant-owned tables carry accountId and are covered by RLS policies.
+//   * Nothing is hard-deleted; rows carry deletedAt and a status enum.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

@@ -1,0 +1,82 @@
+# Production-shaped composition: the API image plus its dependencies.
+#
+# Intended for a staging box or an on-prem deployment. Managed services (RDS,
+# ElastiCache, S3) replace the postgres/redis/minio services in real production —
+# point the app at them through the environment instead.
+#
+#   docker compose -f docker/docker-compose.prod.yml --env-file .env.production up -d
+
+name: ticketit-prod
+
+services:
+  api:
+    image: ticketit-api:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    restart: unless-stopped
+    env_file:
+      - ../.env.production
+    environment:
+      APP_ENV: production
+      NODE_ENV: production
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    # Migrations run as a separate step in the deploy pipeline, never on boot:
+    # three replicas starting at once would race each other.
+    command: ['node', 'dist/main.js']
+
+  # One-shot migration runner. Run before rolling the api service:
+  #   docker compose -f docker/docker-compose.prod.yml run --rm migrate
+  migrate:
+    image: ticketit-api:${IMAGE_TAG:-latest}
+    profiles: ['tools']
+    env_file:
+      - ../.env.production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+
+  postgres:
+    image: postgres:16.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ticketit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-ticketit}
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-ticketit}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:

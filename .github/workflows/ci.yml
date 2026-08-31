@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22.13.0'
+
+jobs:
+  verify:
+    name: Lint, typecheck & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Real Postgres and Redis rather than mocks: the failures worth catching in
+    # this codebase (RLS policies, transaction behaviour, queue wiring) do not
+    # reproduce against an in-memory double.
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_USER: ticketit
+          POSTGRES_PASSWORD: ticketit
+          POSTGRES_DB: ticketit_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ticketit"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      APP_ENV: development
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ticketit:ticketit@localhost:5432/ticketit_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: ticketit-test
+      S3_ACCESS_KEY_ID: test
+      S3_SECRET_ACCESS_KEY: test
+      S3_PUBLIC_BASE_URL: http://localhost:9000/ticketit-test
+      JWT_ACCESS_SECRET: ci-access-secret-that-is-long-enough-000000
+      JWT_REFRESH_SECRET: ci-refresh-secret-that-is-long-enough-00000
+      WEBHOOK_HMAC_SECRET: ci-webhook-secret-that-is-long-enough-00000
+      MAIL_FROM_ADDRESS: ci@ticketit.local
+      LOG_LEVEL: warn
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` installs exactly what package-lock.json pins and fails if the
+      # lockfile and package.json have drifted.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Apply migrations
+        run: npm run db:deploy
+
+      # Fails when the schema and the committed migrations have drifted — the
+      # usual cause of a deploy that works locally and breaks in staging.
+      - name: Verify migration state
+        run: npm run db:status
+
+      - name: Unit tests
+        run: npm test
+
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: Build
+        run: npm run build
+
+  image:
+    name: Build container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: verify
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
