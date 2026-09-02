@@ -14,12 +14,26 @@ export interface AppConfig {
     readonly apiVersion: string;
     readonly shutdownTimeoutMs: number;
     readonly release: string;
+    /** Public address of the frontend; the base of every emailed link. */
+    readonly portalBaseUrl: string;
   };
   readonly database: {
     readonly url: string;
     readonly poolSize: number;
     readonly statementTimeoutMs: number;
     readonly logQueries: boolean;
+  };
+  /**
+   * The legacy Ticket-IT database. Read-only, and only the authentication path
+   * touches it — see src/database/legacy.
+   */
+  readonly legacyDatabase: {
+    readonly url: string;
+    readonly poolSize: number;
+    /** Re-verify against legacy when the locally stored hash rejects. */
+    readonly authFallbackEnabled: boolean;
+    /** Age after which a successful login also refreshes the replicated user. */
+    readonly userSyncTtlSeconds: number;
   };
   readonly redis: {
     readonly url: string;
@@ -45,6 +59,8 @@ export interface AppConfig {
       readonly memoryCost: number;
       readonly timeCost: number;
     };
+    readonly invitationTtlHours: number;
+    readonly passwordResetTtlMinutes: number;
   };
   readonly security: {
     readonly corsOrigins: readonly string[];
@@ -120,12 +136,19 @@ function toAppConfig(env: RawEnv): AppConfig {
       apiVersion: env.API_VERSION,
       shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS,
       release: env.GIT_SHA,
+      portalBaseUrl: env.PORTAL_BASE_URL.replace(/\/+$/, ''),
     },
     database: {
       url: env.DATABASE_URL,
       poolSize: env.DATABASE_POOL_SIZE,
       statementTimeoutMs: env.DATABASE_STATEMENT_TIMEOUT_MS,
       logQueries: env.DATABASE_LOG_QUERIES,
+    },
+    legacyDatabase: {
+      url: env.LEGACY_DATABASE_URL,
+      poolSize: env.LEGACY_DATABASE_POOL_SIZE,
+      authFallbackEnabled: env.LEGACY_AUTH_FALLBACK_ENABLED,
+      userSyncTtlSeconds: env.LEGACY_USER_SYNC_TTL_SECONDS,
     },
     redis: {
       url: env.REDIS_URL,
@@ -151,6 +174,8 @@ function toAppConfig(env: RawEnv): AppConfig {
         memoryCost: env.PASSWORD_HASH_MEMORY_COST,
         timeCost: env.PASSWORD_HASH_TIME_COST,
       },
+      invitationTtlHours: env.INVITATION_TTL_HOURS,
+      passwordResetTtlMinutes: env.PASSWORD_RESET_TTL_MINUTES,
     },
     security: {
       corsOrigins: env.CORS_ORIGINS,

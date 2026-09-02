@@ -10,5 +10,20 @@ export type {
   PrismaLogEvent,
   PrismaQueryEvent,
 } from './prisma-client.factory';
-export { TENANT_SESSION_VAR, withCurrentTenantScope, withTenantScope } from './tenant-scope';
+export {
+  TENANT_APP_ROLE,
+  TENANT_SESSION_VAR,
+  withCurrentTenantScope,
+  withTenantScope,
+} from './tenant-scope';
 export type { TransactionClient } from './tenant-scope';
+export {
+  applyReadOnly,
+  buildLegacyDatabaseUrl,
+  buildLegacyPrismaClientOptions,
+  createLegacyPrismaClient,
+  LegacyDatabaseReadOnlyError,
+  LegacyPrisma,
+  LegacyPrismaService,
+} from './legacy';
+export type { LegacyPrismaClientOptionsInput, ReadOnlyLegacyClient } from './legacy';

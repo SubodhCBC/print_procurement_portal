@@ -42,14 +42,35 @@ export const envSchema = z
     API_PREFIX: z.string().default('api'),
     API_VERSION: z.string().default('1'),
     SHUTDOWN_TIMEOUT_MS: positiveInt.default(15_000),
+    /**
+     * Where the Next.js frontend is served from. Every link this service emails
+     * — invitation, password reset — is built against it, so it must be the
+     * address the *recipient* can reach, not the API's own host.
+     */
+    PORTAL_BASE_URL: z.string().url().default('http://localhost:3001'),
+    /** How long an invitation or password-reset link stays usable. */
+    INVITATION_TTL_HOURS: positiveInt.default(168),
+    PASSWORD_RESET_TTL_MINUTES: positiveInt.default(60),
     /** Injected by CI at build time; tags logs, Sentry releases and /health. */
     GIT_SHA: z.string().default('unknown'),
 
-    // --- Database ---
+    // --- Database (primary, owned by this service) ---
     DATABASE_URL: z.string().url().startsWith('postgres'),
     DATABASE_POOL_SIZE: positiveInt.default(10),
     DATABASE_STATEMENT_TIMEOUT_MS: positiveInt.default(15_000),
     DATABASE_LOG_QUERIES: booleanish.default(false),
+
+    // --- Legacy database (read-only source of truth for first login) ---
+    // Not `.url()`: a SQL Server connection string is semicolon-delimited
+    // (`sqlserver://host:1433;database=x;user=y`) and is not a WHATWG URL, so
+    // url() rejects perfectly valid values.
+    LEGACY_DATABASE_URL: z
+      .string()
+      .min(1)
+      .startsWith('sqlserver://', 'must be a SQL Server connection string'),
+    LEGACY_DATABASE_POOL_SIZE: positiveInt.default(5),
+    LEGACY_AUTH_FALLBACK_ENABLED: booleanish.default(true),
+    LEGACY_USER_SYNC_TTL_SECONDS: positiveInt.default(86_400),
 
     // --- Redis / queues ---
     REDIS_URL: z.string().url().startsWith('redis'),

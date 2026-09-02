@@ -19,7 +19,11 @@ export function setupSwagger(app: INestApplication, config: AppConfig): string |
       .setDescription('B2B web-to-print procurement platform')
       .setVersion(config.app.release)
       .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'access-token')
-      .addServer(`/${config.app.globalPrefix}`)
+      // No .addServer(globalPrefix): the generated paths already carry it
+      // (`/api/v1/auth/login`), so declaring it as a server base as well makes
+      // Swagger UI issue `/api/api/v1/...` and 404. It also broke the health
+      // probes, which are excluded from the prefix and live at `/health/*` —
+      // a server base would have sent those to `/api/health/*`.
       .build(),
   );
 

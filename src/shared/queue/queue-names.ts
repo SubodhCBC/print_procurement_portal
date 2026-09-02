@@ -18,6 +18,14 @@ export const QueueName = {
   BILLING: 'billing',
   /** Large CSV/XLSX report generation delivered via object storage. */
   REPORT: 'report',
+  /**
+   * Bulk catalogue loads. Its own failure domain rather than sharing REPORT:
+   * both are long-running bulk work, but an import saturates database write
+   * capacity while a report saturates memory and storage — and a customer
+   * waiting on an invoice export should not queue behind a ten-thousand-row
+   * catalogue load.
+   */
+  IMPORT: 'import',
   /** Scheduled housekeeping: orphan assets, expired sessions, stale carts. */
   MAINTENANCE: 'maintenance',
 } as const;

@@ -4,6 +4,8 @@
  * not ripple through every domain module.
  */
 export * from './constants';
+export * from './authorization';
+export * from './decorators';
 export * from './exceptions';
 export * from './interfaces';
 export * from './context';

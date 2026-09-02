@@ -5,3 +5,9 @@ coverage
 pnpm-lock.yaml
 docs/
 packages/db/src/generated
+
+# Vendored reference projects. Checked out beside this service for its API
+# contract (see docs/IMPLEMENTATION_GAP_ANALYSIS.md section 10) and owned by a
+# different repository — `npm run format` must not rewrite someone else's code.
+TicketIT-Ecommerce-main
+PrintProcurementPortal

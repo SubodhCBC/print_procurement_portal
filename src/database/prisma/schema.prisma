@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
-// Ticket-IT Portal — data model
+// Ticket-IT Portal — data model (PostgreSQL, owned by this service)
 //
-// Infrastructure scaffold only. No domain models are defined yet; they land
-// module by module (Account, Site, User, Product, RateCard, Order,
-// TemplateVersion, AuditLogEntry, OutboxEvent, WebhookDeliveryLog...).
+// This is the primary database. The legacy Azure SQL Server database is a
+// separate, read-only datasource with its own schema and its own generated
+// client — see src/database/prisma/legacy/schema.prisma.
 //
 // Conventions agreed up front, so every model that follows obeys them:
-//   * Public ids are prefixed strings from @ticketit/shared (createId).
+//   * Public ids are prefixed strings from @/common (createId).
 //   * Money is NUMERIC(12,2) via @db.Decimal(12, 2) — never Float.
 //   * Timestamps are @db.Timestamptz(3); the database stores UTC.
 //   * Tenant-owned tables carry accountId and are covered by RLS policies.
@@ -15,10 +15,1767 @@
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["relationJoins"]
+  previewFeatures = ["relationJoins", "postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  // Declared so Prisma knows they exist. Without this, `migrate diff` treats
+  // the GIN trigram indexes on Product as drift and generates a DROP for them
+  // on every subsequent migration — silently removing the only thing that keeps
+  // the catalogue search off a sequential scan.
+  // btree_gist lets an EXCLUDE constraint mix an equality column (accountId)
+  // with a range one (the effective-date window), which is what stops two
+  // active rate cards from ever overlapping for the same customer.
+  extensions = [citext, pg_trgm, pgcrypto, btree_gist]
+}
+
+// --- Identity ---------------------------------------------------------------
+
+/// The three portals in the platform. Mirrors the `Role` union in
+/// src/common/interfaces/request-context.interface.ts — the two must agree,
+/// which role-mapping.spec.ts asserts.
+enum PortalRole {
+  ADMIN
+  HEAD_OFFICE
+  SITE_USER
+}
+
+enum UserStatus {
+  ACTIVE
+  /// Invited but not yet activated: the invitation has been sent and no
+  /// password has been set, so the account cannot authenticate.
+  PENDING
+  /// Deactivated upstream (`Users.IsActive = 0`) as of the last sync, or
+  /// deactivated here by an administrator.
+  DISABLED
+}
+
+/// Where a user came from, per the architecture document's three categories.
+///
+/// It drives provisioning, not permission: what a user may do is decided by
+/// `role` plus their permission grants. This only records origin, which
+/// support and audit need and which the invitation flow branches on.
+enum UserType {
+  /// Replicated from the legacy Ticket-IT database on first login.
+  EXISTING
+  /// Created in this portal by an administrator; no legacy counterpart.
+  NEW
+  /// A client, vendor, partner or temporary collaborator. Least privileged by
+  /// default and normally scoped to a single site.
+  EXTERNAL
+}
+
+/// A tenant. Derived from the legacy `Users.Client` column, which holds a plain
+/// retailer name ("Cellarbrations", "BottleO", "IHG") rather than a foreign key
+/// — the legacy schema has no accounts table. Accounts are therefore created on
+/// demand, the first time a user of that client authenticates.
+model Account {
+  id String @id
+
+  /// Slugified `Users.Client`. The natural key we de-duplicate on when a legacy
+  /// user first authenticates, because the raw string's casing and spacing are
+  /// inconsistent upstream. Internal — the customer never sees it.
+  slug         String  @unique
+  /// The customer-facing code, as it appears on invoices and in the admin UI.
+  /// Set by an administrator; back-filled from the slug for accounts that were
+  /// auto-created from a legacy login before this column existed.
+  accountCode  String  @unique
+  /// The raw legacy value, preserved verbatim for support and reconciliation.
+  /// Null for an account created here rather than derived from a legacy client.
+  legacyClient String?
+  name         String
+
+  status AccountStatus @default(ACTIVE)
+
+  /// Where invoices and account-level notifications go. Not a login.
+  contactEmail String?
+  contactPhone String?
+
+  /// Order total above which an order needs head-office approval. Null means
+  /// every order is approved automatically; zero means every order needs
+  /// approval, which is a real configuration and the reason this is not
+  /// modelled as "0 = no threshold".
+  approvalThreshold Decimal? @db.Decimal(12, 2)
+
+  /// Account-wide defaults for the purchase-order rule. A site may override
+  /// both — see `Site.poRequired` / `Site.poPrefix`, which win when set.
+  requirePoNumber Boolean @default(false)
+  poPrefix        String?
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  users             User[]
+  sites             Site[]
+  addresses         Address[]
+  invitations       Invitation[]
+  siteAccess        UserSiteAccess[]
+  permissionGrants  UserPermissionGrant[]
+  auditLog          AuditLogEntry[]
+  productVisibility ProductAccountVisibility[]
+  catalogImports    CatalogImportJob[]
+  rateCards         RateCard[]
+  carts             Cart[]
+  orders            Order[]
+  approvalRules     ApprovalRule[]
+  approvalRequests  ApprovalRequest[]
+
+  @@map("accounts")
+}
+
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+  /// Retained but barred from ordering — typically a billing hold. Distinct
+  /// from INACTIVE so the reason survives in the record.
+  SUSPENDED
+}
+
+/// A branch, outlet or store: the level an order is placed for and billed to.
+///
+/// Sourced from the legacy `Outlets` table (`legacyOutletId`), but sites can
+/// also be created directly in the portal for accounts that have no legacy
+/// footprint. Budget caps and purchase-order rules live here rather than on the
+/// account because they are negotiated per branch.
+model Site {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// Branch code as the customer knows it ("VIC-042"). Unique within the
+  /// account, not globally — two retailers may both use "001".
+  code String
+  name String
+
+  /// `Outlets.Id` upstream, when this site was imported rather than created
+  /// here. Unique so a re-import updates rather than duplicates.
+  legacyOutletId Int? @unique
+
+  status SiteStatus @default(ACTIVE)
+
+  /// Spend ceiling per billing period, enforced at checkout. Null means the
+  /// site is uncapped; zero means it may not order at all, which is a
+  /// meaningful state and the reason this is not modelled as "0 = unlimited".
+  monthlyBudget Decimal? @db.Decimal(12, 2)
+
+  /// Whether checkout requires a purchase-order reference, and the prefix that
+  /// reference must start with. Both are per-site contractual rules.
+  poRequired Boolean @default(false)
+  poPrefix   String?
+
+  /// Finance attribution, passed through to the ERP journal entry.
+  costCentre String?
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  addresses     Address[]
+  users         User[]           @relation("UserPrimarySite")
+  siteAccess    UserSiteAccess[]
+  invitations   Invitation[]
+  carts         Cart[]
+  orders        Order[]
+  approvalRules ApprovalRule[]
+
+  @@unique([accountId, code])
+  @@index([accountId, status])
+  @@map("sites")
+}
+
+enum SiteStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum AddressKind {
+  BILLING
+  SHIPPING
+}
+
+/// A bill-to or ship-to address.
+///
+/// Modelled as rows rather than as columns on Site because a branch routinely
+/// has one billing address and several delivery addresses (the store, a
+/// warehouse, a campaign venue), and checkout has to let the user pick.
+model Address {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// Null for an account-level address — typically the head-office bill-to.
+  siteId String?
+  site   Site?   @relation(fields: [siteId], references: [id])
+
+  kind AddressKind
+
+  /// What the customer calls it in the picker ("Back dock", "Head office").
+  label         String?
+  recipientName String?
+
+  line1    String
+  line2    String?
+  city     String
+  region   String?
+  postcode String
+  /// ISO 3166-1 alpha-2. Stored uppercase; the carrier adapters depend on it.
+  country  String  @db.Char(2)
+  phone    String?
+
+  /// The one pre-selected at checkout for this site and kind. Not enforced as
+  /// a partial unique index yet — the service keeps it single.
+  isDefault Boolean @default(false)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  cartsShippingTo  Cart[]  @relation("CartShipTo")
+  cartsBillingTo   Cart[]  @relation("CartBillTo")
+  ordersShippingTo Order[] @relation("OrderShipTo")
+
+  @@index([accountId])
+  @@index([siteId, kind])
+  @@map("addresses")
+}
+
+/// A user of the portal.
+///
+/// Three origins share this table (see `UserType`). A legacy user is replicated
+/// here on first successful login; the legacy row remains the source of truth
+/// for *provisioning*, while this row is the source of truth for
+/// *authentication* from the second login onwards. Portal-native and external
+/// users have no legacy counterpart at all, which is why every `legacy*` column
+/// is nullable.
+model User {
+  id String @id
+
+  /// The stable, immutable identifier this user is known by across systems.
+  ///
+  /// The architecture document is explicit that email and username must not be
+  /// integration keys because they change. `legacyUserId` cannot serve either:
+  /// portal-native and external users do not have one. Every future integration
+  /// — DAM, ERP, a centralized identity provider — joins on this.
+  identityUserId String @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// The branch this user belongs to. Null for ADMIN and for account-wide
+  /// HEAD_OFFICE users, matching `AuthenticatedActor.siteId`.
+  siteId String?
+  site   Site?   @relation("UserPrimarySite", fields: [siteId], references: [id])
+
+  userType UserType @default(EXISTING)
+
+  /// `Users.Id` upstream, and the join key for every re-sync — a login can be
+  /// renamed upstream, an integer id cannot. Null for users created here.
+  legacyUserId Int? @unique
+
+  /// `Users.Login`, stored lowercased. Verified unique case-insensitively
+  /// across all 4432 legacy rows, so it is the credential identifier. For a
+  /// portal-native or external user it is their email address.
+  /// `loginDisplay` keeps the original casing for the UI.
+  login        String @unique
+  loginDisplay String
+
+  /// NOT unique: 159 groups of legacy users share an email address. Anything
+  /// looking a user up by email must expect multiple matches.
+  email String
+
+  firstName String
+  lastName  String
+  phone     String?
+
+  /// Argon2id hash of the password the user typed at first login, or the one
+  /// they chose when accepting an invitation. The legacy PBKDF2-SHA1 / bcrypt
+  /// hash is deliberately NOT carried over — see password-hasher.service.ts.
+  /// Null means the local credential is unusable: for a legacy user the next
+  /// login falls back to legacy verification, for an invited user it means the
+  /// invitation has not been accepted yet.
+  passwordHash String?
+
+  role   PortalRole
+  status UserStatus @default(ACTIVE)
+
+  /// The raw `webpages_Roles.RoleName` this user held upstream, kept because
+  /// the mapping to PortalRole is lossy (Franchisee and RegionalManager are
+  /// distinct upstream but both drive site-level access here).
+  legacyRoleName String?
+
+  /// Denormalised legacy org fields. Copied verbatim on sync so support can
+  /// reconcile a portal user against the legacy record without a cross-database
+  /// join, which no single query can do here.
+  legacyRegionName   String?
+  legacyGroupName    String?
+  legacyOutletId     Int?
+  isHeadOfficeAdmin  Boolean @default(false)
+  /// `Users.IsPasswordChangeRequired` — surfaced to the client so it can force
+  /// a change screen; this service does not yet enforce it.
+  mustChangePassword Boolean @default(false)
+
+  /// When this row was last refreshed from legacy, and the fingerprint of the
+  /// legacy payload at that moment. The fingerprint lets a re-sync skip the
+  /// write when nothing upstream changed. Both null for a user who has no
+  /// legacy counterpart.
+  legacySyncedAt    DateTime? @db.Timestamptz(3)
+  legacyFingerprint String?
+
+  /// Free-text organisational label shown in the admin user table. Not a
+  /// permission boundary and deliberately not a foreign key — the legacy
+  /// `Departments` table is a different concept and is not synced.
+  department String?
+
+  /// This user's own spend ceiling per billing period, checked at checkout
+  /// alongside the site's. Null means only the site cap applies. SOW BE-02
+  /// requires both levels, because a branch budget is not a purchasing limit
+  /// for each person who can spend it.
+  monthlyBudgetCap Decimal? @db.Decimal(12, 2)
+
+  /// Overrides the site's purchase-order prefix for this user, for accounts
+  /// that allocate PO ranges per buyer.
+  poPrefix String?
+
+  lastLoginAt DateTime? @db.Timestamptz(3)
+  /// When an invited user accepted and set a password.
+  activatedAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  refreshTokens    RefreshToken[]
+  passwordResets   PasswordResetToken[]
+  siteAccess       UserSiteAccess[]
+  permissionGrants UserPermissionGrant[] @relation("GrantSubject")
+  grantsIssued     UserPermissionGrant[] @relation("GrantIssuer")
+  invitationsSent  Invitation[]          @relation("InvitationIssuer")
+  invitationUsed   Invitation?           @relation("InvitationAcceptor")
+  auditEntries     AuditLogEntry[]
+  catalogImports   CatalogImportJob[]
+  rateCardsCreated RateCard[]            @relation("RateCardAuthor")
+  carts            Cart[]
+  ordersPlaced     Order[]               @relation("OrderPlacedBy")
+  ordersApproved   Order[]               @relation("OrderApprovedBy")
+  approvalRules    ApprovalRule[]        @relation("ApprovalRuleApprover")
+  approvalSteps    ApprovalStep[]        @relation("ApprovalStepApprover")
+  approvalsDecided ApprovalStep[]        @relation("ApprovalStepDecider")
+
+  @@index([accountId])
+  @@index([email])
+  @@index([siteId])
+  @@map("users")
+}
+
+/// What happened, who did it, and to what.
+///
+/// SOW BE-06 calls for an immutable audit log covering every entity mutation.
+/// Immutable here means by convention and by API surface — there is no update
+/// or delete path in AuditService, and no endpoint exposes one. PostgreSQL is
+/// not asked to enforce it, because the migration role would be able to bypass
+/// whatever trigger did.
+///
+/// The actor's name, email and role are **copied in, not joined**. An audit
+/// entry has to keep saying what was true at the time: a user who is later
+/// renamed, demoted or deactivated must not silently rewrite three years of
+/// history, and a hard-deleted actor must not turn their entries into nulls.
+model AuditLogEntry {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// Null for an action taken by the system itself — a scheduled job, a
+  /// webhook, a migration.
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id])
+
+  actorName  String
+  actorEmail String
+  actorRole  String
+
+  /// Past tense, dotted, stable: `site.created`, `order.approved`,
+  /// `user.permission_granted`. Read by dashboards and alerts, so it is an API
+  /// in its own right — see AuditAction in audit.actions.ts.
+  action String
+
+  entityType AuditEntityType
+  entityId   String
+  /// Human label at the time of the action ("Richmond", "VIC-042"), so the log
+  /// stays readable after the entity is renamed or removed.
+  entityName String?
+
+  /// Before/after for the changed fields only, plus any context worth keeping.
+  /// Never secrets: password hashes, tokens and presigned URLs are stripped by
+  /// AuditService before the row is written.
+  details Json?
+
+  ipAddress String?
+  userAgent String?
+  /// Correlates an audit entry with the request that produced it, and with the
+  /// structured logs for that request.
+  requestId String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([accountId, entityType, entityId])
+  @@index([accountId, actorId, createdAt(sort: Desc)])
+  @@map("audit_log_entries")
+}
+
+enum AuditEntityType {
+  ACCOUNT
+  SITE
+  USER
+  INVITATION
+  PERMISSION
+  PRODUCT
+  RATE_CARD
+  ORDER
+  TEMPLATE
+  INTEGRATION
+  SYSTEM
+}
+
+/// Extra sites a HEAD_OFFICE user oversees beyond their primary one.
+///
+/// A site user has exactly one site (`User.siteId`) and no rows here. A
+/// regional or head-office user has a primary site of null and one row per
+/// branch they may act for, which is what makes "approve for these five
+/// stores" expressible without inventing a second role per region.
+model UserSiteAccess {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  siteId String
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([userId, siteId])
+  @@index([accountId])
+  @@index([siteId])
+  @@map("user_site_access")
+}
+
+enum GrantEffect {
+  ALLOW
+  DENY
+}
+
+/// A per-user departure from the permissions their role grants by default.
+///
+/// The default role -> permission map lives in code
+/// (src/common/authorization/permissions.ts) because it is a product decision
+/// that belongs in review and in tests, not in a table an operator can edit
+/// into a privilege escalation. This table exists for the cases the map cannot
+/// express: an external user given access to one document, or a site user
+/// temporarily denied ordering. DENY always wins over ALLOW.
+model UserPermissionGrant {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  userId String
+  user   User   @relation("GrantSubject", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// A value from the `Permission` catalog in code. Stored as text rather than
+  /// an enum so adding a permission is a code deploy, not a migration that
+  /// locks the table.
+  permission String
+
+  effect GrantEffect @default(ALLOW)
+
+  /// Narrows the grant to one object — a DAM document id, a site id. Null means
+  /// the grant applies everywhere the permission is checked.
+  resourceId String?
+
+  grantedById String?
+  grantedBy   User?   @relation("GrantIssuer", fields: [grantedById], references: [id])
+  reason      String?
+
+  /// Null for a permanent grant. Expired rows are ignored, not deleted, so the
+  /// audit trail survives.
+  expiresAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  /// PostgreSQL treats NULLs as distinct, so this does not prevent two
+  /// account-wide grants of the same permission. The service upserts, and the
+  /// resolver de-duplicates.
+  @@unique([userId, permission, resourceId])
+  @@index([accountId])
+  @@index([userId, expiresAt])
+  @@map("user_permission_grants")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+/// An outstanding invitation for a portal-native or external user.
+///
+/// The user row is only created when the invitation is accepted, so a revoked
+/// or expired invitation leaves nothing behind that could later be logged into.
+/// The token is emailed once and stored only as a SHA-256 digest, exactly as
+/// refresh tokens are.
+model Invitation {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// The branch the invitee will belong to. Required for EXTERNAL invitees —
+  /// enforced in the service, since Prisma cannot express a conditional NOT
+  /// NULL.
+  siteId String?
+  site   Site?   @relation(fields: [siteId], references: [id])
+
+  email     String
+  firstName String
+  lastName  String
+
+  role     PortalRole
+  userType UserType
+
+  /// SHA-256 of the opaque invitation token.
+  tokenHash String @unique
+
+  status    InvitationStatus @default(PENDING)
+  expiresAt DateTime         @db.Timestamptz(3)
+
+  acceptedAt     DateTime? @db.Timestamptz(3)
+  acceptedUserId String?   @unique
+  acceptedUser   User?     @relation("InvitationAcceptor", fields: [acceptedUserId], references: [id])
+
+  revokedAt DateTime? @db.Timestamptz(3)
+
+  invitedById String?
+  invitedBy   User?   @relation("InvitationIssuer", fields: [invitedById], references: [id])
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([accountId, status])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("invitations")
+}
+
+/// One row per password-reset request.
+///
+/// Not tenant-scoped and deliberately not covered by RLS: the reset flow runs
+/// unauthenticated, before any account is known.
+model PasswordResetToken {
+  id String @id
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, usedAt])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// One row per issued refresh token, so a session can actually be revoked.
+///
+/// A stateless refresh JWT cannot be invalidated before it expires, which for a
+/// 30-day TTL means a stolen token stays valid for a month. The token itself is
+/// never stored — only its SHA-256 digest, so a dump of this table cannot be
+/// replayed.
+model RefreshToken {
+  id String @id
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the opaque token. Unique so a replayed token is a lookup, not
+  /// a scan.
+  tokenHash String @unique
+
+  /// Set when this token is exchanged for a new one. A second use of an
+  /// already-rotated token means the token leaked: the whole family is revoked.
+  rotatedToId String? @unique
+
+  expiresAt DateTime  @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// --- Catalog -----------------------------------------------------------------
+//
+// The product catalog is GLOBAL, not tenant-owned.
+//
+// SOW section 1 gives the system administrator "complete control over global
+// catalog", and BE-04 makes per-customer pricing and visibility a rate-card
+// concern rather than a data-ownership one. So none of the models below carries
+// an accountId and none is covered by an RLS policy — the single exception is
+// ProductAccountVisibility, which exists precisely to express "this account may
+// see this product" and is therefore tenant-owned.
+//
+// The consequence to keep in mind: a bug in a catalog query cannot leak one
+// customer's data to another, because there is no customer's data in here. What
+// it *can* leak is a restricted product to an account that should not see it,
+// which is why visibility is filtered in exactly one place — see
+// visibilityFilter() in products.service.ts.
+
+/// A top-level catalog grouping: Signs, Posters, Banners, Flyers, Business
+/// Cards, Brochures, Marketing Assets, Promotional Products.
+///
+/// Flat rather than a tree. The eight categories the statement of work names
+/// have no hierarchy, and a self-referencing parent that nothing populates is a
+/// query complication in every catalog listing for a structure nobody asked
+/// for. Nesting is a migration away if the catalog outgrows this.
+model ProductCategory {
+  id String @id
+
+  /// Stable, human-readable key used in imports and URLs ("BUSINESS_CARDS").
+  /// Upper-cased on write so a re-import cannot create a case-only duplicate.
+  code String @unique
+  name String
+
+  description String?
+
+  /// Display order in the catalog navigation. Ties are broken by name.
+  sortOrder Int @default(0)
+
+  status CatalogStatus @default(ACTIVE)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  products      Product[]
+  approvalRules ApprovalRule[]
+
+  @@index([status, sortOrder])
+  @@map("product_categories")
+}
+
+enum CatalogStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// The lifecycle of a catalog item.
+///
+/// DRAFT is ours; the other three are the statement of work's. An administrator
+/// has to be able to build a product — options, variants, tiers, artwork —
+/// before anyone can order it, and without DRAFT the only way to do that is to
+/// create it live and race the customer.
+enum ProductStatus {
+  /// Being set up. Invisible to customers, orderable by nobody.
+  DRAFT
+  /// Orderable.
+  ACTIVE
+  /// Temporarily off sale — out of stock, seasonal, supplier issue. Still
+  /// visible so existing orders and re-orders make sense.
+  UNAVAILABLE
+  /// Permanently replaced by `supersededBy`. Terminal: a superseded product
+  /// never returns to sale, and re-order flows follow the pointer instead.
+  SUPERSEDED
+}
+
+enum ProductVisibility {
+  /// Every account sees it. The default, and what most of the catalog is.
+  ALL_ACCOUNTS
+  /// Only the accounts listed in ProductAccountVisibility. Used for
+  /// contract-specific and white-label lines.
+  RESTRICTED
+}
+
+/// How a product is counted and sold.
+enum UnitOfMeasure {
+  EACH
+  PACK
+  BOX
+  ROLL
+  SET
+  SQUARE_METRE
+}
+
+/// A catalog item.
+///
+/// Print specifications (bleed, safe margin, dimensions) live here rather than
+/// on the template, because they are properties of the physical product a
+/// template is placed onto — the same A2 poster stock has the same 3mm bleed
+/// whichever artwork is printed on it. INT-01 sends these to the print
+/// production system verbatim.
+model Product {
+  id String @id
+
+  /// The customer-facing stock code. Unique across the catalog, upper-cased on
+  /// write, and the key the bulk importer upserts on.
+  sku  String @unique
+  name String
+
+  description String?
+
+  categoryId String
+  category   ProductCategory @relation(fields: [categoryId], references: [id])
+
+  status     ProductStatus     @default(DRAFT)
+  visibility ProductVisibility @default(ALL_ACCOUNTS)
+
+  /// List price for one `uom` before any rate card is applied. Rate cards
+  /// (BE-04) override it per account; this is what they discount from.
+  basePrice Decimal @db.Decimal(12, 2)
+
+  /// Minimum order quantity, and the increment above it. An `orderMultiple` of
+  /// 50 with an `moq` of 100 means 100, 150, 200 — enforced at checkout by
+  /// BE-05.
+  moq           Int @default(1)
+  orderMultiple Int @default(1)
+
+  /// How many physical units are in one sellable unit — a pack of 250 cards is
+  /// packSize 250, uom PACK. Pricing and stock are both per `uom`, never per
+  /// physical unit, and BE-05 depends on that staying true.
+  packSize Int           @default(1)
+  uom      UnitOfMeasure @default(EACH)
+
+  /// Finished trim size, in millimetres. Null for products with no fixed size
+  /// (promotional items, variable-length roll media).
+  widthMm  Int?
+  heightMm Int?
+  depthMm  Int?
+
+  /// Shipping weight of one `uom`, for the 3PL adapter (INT-02).
+  weightGrams Int?
+
+  /// Print specification, in millimetres. `bleedMm` is the artwork that runs
+  /// past the trim; `safeMarginMm` is the inset nothing important may cross.
+  bleedMm      Decimal? @db.Decimal(5, 2)
+  safeMarginMm Decimal? @db.Decimal(5, 2)
+
+  /// Whether stock is counted for this item. False for print-on-demand, where
+  /// there is no shelf to run out of and a stock check would block every order.
+  trackInventory    Boolean @default(true)
+  stockOnHand       Int     @default(0)
+  lowStockThreshold Int     @default(0)
+
+  /// Working days from order approval to dispatch, shown at checkout.
+  leadTimeDays Int?
+
+  /// The replacement, when this product is SUPERSEDED. Self-referencing so a
+  /// re-order of a discontinued item can follow the chain to what replaced it.
+  supersededById String?
+  supersededBy   Product?  @relation("ProductSuccession", fields: [supersededById], references: [id])
+  supersedes     Product[] @relation("ProductSuccession")
+
+  /// Free-form search and merchandising labels. A Postgres text[], queried with
+  /// `has` / `hasSome` rather than a join, because tags carry no data of their
+  /// own.
+  tags String[] @default([])
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  options       ProductOption[]
+  variants      ProductVariant[]
+  volumeTiers   ProductVolumeTier[]
+  assets        ProductAsset[]
+  visibleTo     ProductAccountVisibility[]
+  rateCardItems RateCardItem[]
+  cartLines     CartLine[]
+  orderLines    OrderLineItem[]
+
+  @@index([categoryId, status])
+  @@index([status, name])
+  @@index([visibility])
+  /// Substring search. `ILIKE '%banner%'` cannot use a B-tree at all — it
+  /// degrades to a sequential scan the moment the catalogue outgrows a demo —
+  /// so name and SKU each carry a GIN trigram index.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([sku(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@map("products")
+}
+
+/// One configurable axis of a product — Size, Material, Finish, Pack Size.
+///
+/// The selectable values are a text[] on the option rather than their own table:
+/// they are ordered strings with no attributes of their own, and a row per value
+/// would mean a join on every product detail page just to render a dropdown.
+/// ProductVariant references them by value, which is why a value already in use
+/// by a variant cannot be removed — see the guard in products.service.ts.
+model ProductOption {
+  id String @id
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// "Size", "Material", "Finish". Unique per product.
+  name String
+
+  /// Ordered as the customer should see them: ["A4", "A3", "A2"], not
+  /// alphabetically.
+  values String[]
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([productId, name])
+  @@index([productId, sortOrder])
+  @@map("product_options")
+}
+
+/// A specific configuration of a product, with its own stock code and stock.
+///
+/// `attributes` is a JSON map of option name to chosen value —
+/// `{"Size": "A2", "Material": "Gloss 150gsm"}`. A join table of variant to
+/// option value would normalise it, at the cost of a three-table join to answer
+/// "what is this variant", which is the most common catalog read there is. The
+/// service validates every key and value against the product's options on write,
+/// so the JSON cannot drift from them.
+model ProductVariant {
+  id String @id
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku String @unique
+
+  attributes Json
+
+  /// Absolute price for this variant, not a delta. A delta is the tempting
+  /// choice and the wrong one: a base price change would silently reprice every
+  /// variant, and "A2 costs 18.00" is what the contract actually says. Null
+  /// means the variant sells at the product's base price.
+  priceOverride Decimal? @db.Decimal(12, 2)
+
+  stockOnHand Int           @default(0)
+  status      CatalogStatus @default(ACTIVE)
+  sortOrder   Int           @default(0)
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  cartLines  CartLine[]
+  orderLines OrderLineItem[]
+
+  @@index([productId, status])
+  @@map("product_variants")
+}
+
+/// "100 or more, 10% off" — the catalog-wide ladder, before any rate card.
+///
+/// Stored as a discount percentage rather than a unit price so a base price
+/// change carries through the whole ladder. A rate card that sets a fixed
+/// contract price (BE-04) replaces the ladder rather than stacking on it.
+model ProductVolumeTier {
+  id String @id
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Inclusive lower bound, in `uom`. The applicable tier is the highest one
+  /// whose minQuantity the order line meets.
+  minQuantity     Int
+  discountPercent Decimal @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([productId, minQuantity])
+  @@index([productId, minQuantity])
+  @@map("product_volume_tiers")
+}
+
+enum ProductAssetKind {
+  /// Catalog photography and thumbnails.
+  IMAGE
+  /// Print-ready source artwork — the high-resolution file INT-01 sends on.
+  ARTWORK
+  /// A specification or dieline PDF the customer can download.
+  SPEC_SHEET
+}
+
+/// A file attached to a product, held in object storage.
+///
+/// Only the key is stored. URLs are minted on read as short-lived presigned
+/// links (see StorageService), because a stored URL is either permanent — and
+/// therefore a public bucket — or expired by the time anyone opens the row.
+model ProductAsset {
+  id String @id
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  kind ProductAssetKind @default(IMAGE)
+
+  /// Object key within the bucket, as built by StorageService.buildKey().
+  storageKey  String @unique
+  filename    String
+  contentType String
+  sizeBytes   Int
+
+  /// Alt text for IMAGE assets. Not optional in spirit — a catalog that fails a
+  /// screen reader fails an accessibility audit — but nullable because a bulk
+  /// import cannot invent it.
+  altText String?
+
+  /// Intrinsic pixel size, read from the file when derivatives are generated.
+  /// Lets the front end reserve the right box before the image loads, which is
+  /// what stops a catalogue grid reflowing as it fills in.
+  widthPx  Int?
+  heightPx Int?
+
+  /// Resized copies, produced asynchronously on the RENDER queue.
+  ///
+  /// Two sizes, not a ladder: a grid thumbnail and a detail-page preview. The
+  /// original is kept untouched and is what the print pipeline uses — a
+  /// derivative is never the source of truth for artwork.
+  derivativeStatus DerivativeStatus @default(NOT_APPLICABLE)
+  thumbnailKey     String?
+  previewKey       String?
+  /// Why generation failed, when it did. Surfaced to the admin UI so a broken
+  /// upload is visible rather than silently thumbnail-less.
+  derivativeError  String?
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([productId, kind, sortOrder])
+  @@index([derivativeStatus])
+  @@map("product_assets")
+}
+
+/// Which accounts may see a RESTRICTED product.
+///
+/// The one tenant-owned table in the catalog, and therefore the one with an RLS
+/// policy: without it a head-office user could read the list and learn which
+/// other customers hold the same contract-specific line.
+///
+/// Rows are ignored entirely for ALL_ACCOUNTS products, so flipping a product
+/// back to unrestricted does not require deleting them — which matters, because
+/// a restriction lifted for a campaign is usually reinstated afterwards.
+model ProductAccountVisibility {
+  id String @id
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([productId, accountId])
+  @@index([accountId])
+  @@map("product_account_visibility")
+}
+
+/// A bulk catalogue import, tracked so the client can poll it.
+///
+/// The rows live here rather than in the queue payload. BullMQ stores job data
+/// in Redis, and a ten-thousand-row spreadsheet is not something to hold there
+/// and keep for a day under the completed-job retention — the queue carries the
+/// job id and nothing else, which is the general rule for anything bulky.
+///
+/// Tenant-owned so the operator who ran an import can find it again and nobody
+/// else's shows up in their list. The catalogue it writes to is global; the
+/// record of who loaded what is not.
+model CatalogImportJob {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  requestedById String?
+  requestedBy   User?   @relation(fields: [requestedById], references: [id])
+
+  status ImportJobStatus @default(QUEUED)
+
+  /// Validate and report without writing. Takes the same path as a real run.
+  dryRun         Boolean @default(false)
+  /// When false, an existing SKU is reported as skipped rather than updated.
+  updateExisting Boolean @default(false)
+
+  /// The submitted rows, unvalidated. Kept after the run so a failed import can
+  /// be re-read against the error report without the operator re-uploading.
+  payload Json
+
+  totalRows Int @default(0)
+  created   Int @default(0)
+  updated   Int @default(0)
+  skipped   Int @default(0)
+  failed    Int @default(0)
+
+  /// Per-row outcomes, in submission order.
+  results Json?
+
+  /// Set only when the job itself failed, as opposed to individual rows failing.
+  error String?
+
+  startedAt  DateTime? @db.Timestamptz(3)
+  finishedAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("catalog_import_jobs")
+}
+
+enum ImportJobStatus {
+  QUEUED
+  RUNNING
+  /// Finished. Individual rows may still have failed — read the counts.
+  COMPLETED
+  /// The job itself failed; `error` says why and no partial counts are trusted.
+  FAILED
+}
+
+enum DerivativeStatus {
+  /// Not an image, or derivatives were never requested.
+  NOT_APPLICABLE
+  PENDING
+  READY
+  FAILED
+}
+
+// --- Rate cards -------------------------------------------------------------
+
+/// A negotiated price list for one account (SOW BE-04).
+///
+/// Tenant-owned and policied, unlike the catalog it prices. The catalog is the
+/// platform operator's and is global; what a particular customer pays is that
+/// customer's contract, and one account reading another's rate card is exactly
+/// the disclosure RLS exists to prevent.
+///
+/// At most one card can be ACTIVE for an account at any instant. That is
+/// enforced by an EXCLUDE constraint on (accountId, effective window) rather
+/// than by a check in the service, because two administrators activating two
+/// cards at the same moment would both pass an application-level check and
+/// leave the account with an ambiguous price. See the migration.
+model RateCard {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// What the contract is called in conversation — "Apex Enterprise Tier A".
+  name  String
+  notes String?
+
+  status RateCardStatus @default(DRAFT)
+
+  /// Inclusive. The card prices nothing before this instant.
+  effectiveFrom DateTime  @db.Timestamptz(3)
+  /// Exclusive, and null means open-ended. Exclusive so a card ending on the
+  /// 1st and one starting on the 1st are not both in force for that instant.
+  effectiveTo   DateTime? @db.Timestamptz(3)
+
+  /// Applied to any product the card does not name explicitly — the "15% off
+  /// list on everything" half of most contracts. Zero means the card only
+  /// prices the products it lists.
+  defaultDiscountPercent Decimal @default(0) @db.Decimal(5, 2)
+
+  /// Who signed it off here. Nullable because a card may outlive the
+  /// administrator who created it.
+  createdById String?
+  createdBy   User?   @relation("RateCardAuthor", fields: [createdById], references: [id])
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  items RateCardItem[]
+
+  /// The lookup on every priced request: this account's live card at an
+  /// instant. Ordered so the planner can walk the window from the index.
+  @@index([accountId, status, effectiveFrom])
+  @@index([status, effectiveTo])
+  @@map("rate_cards")
+}
+
+enum RateCardStatus {
+  /// Being negotiated. Prices nothing — a draft card is invisible to pricing.
+  DRAFT
+  /// In force, subject to its effective window.
+  ACTIVE
+  /// Superseded or expired. Kept because orders priced under it reference it.
+  ARCHIVED
+}
+
+/// One product's price under one rate card.
+///
+/// Exactly one of `fixedPrice` and `discountPercent` may be set, or neither —
+/// "neither" means the item exists only to carry its own volume ladder, or to
+/// pin a product to the card's default discount explicitly. Both at once is
+/// refused at write time, because the precedence between them would be a rule
+/// nobody reading the contract could predict.
+model RateCardItem {
+  id String @id
+
+  rateCardId String
+  rateCard   RateCard @relation(fields: [rateCardId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  /// The contract price for one `uom`, absolute. Replaces the catalog's volume
+  /// ladder outright rather than discounting from it — see rate-card-pricing.ts
+  /// for the full precedence, which is the thing QA-01 asks to be tested.
+  fixedPrice Decimal? @db.Decimal(12, 2)
+
+  /// Percentage off the product's base price. Overrides the card default for
+  /// this product; does not compound with it.
+  discountPercent Decimal? @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  tiers RateCardTier[]
+
+  /// One row per product per card. The upsert key the bulk item editor uses.
+  @@unique([rateCardId, productId])
+  @@index([productId])
+  @@map("rate_card_items")
+}
+
+/// A contract volume ladder: "5,000 or more, 22% off".
+///
+/// Present only when the negotiated ladder differs from the public one. When an
+/// item has tiers they replace the product's `ProductVolumeTier` rows entirely —
+/// they do not stack. A contract that says "22% at 5,000" means the customer
+/// pays 22% off, not 22% off the already-discounted public tier.
+model RateCardTier {
+  id String @id
+
+  rateCardItemId String
+  rateCardItem   RateCardItem @relation(fields: [rateCardItemId], references: [id], onDelete: Cascade)
+
+  /// Inclusive lower bound, in the product's `uom`.
+  minQuantity     Int
+  discountPercent Decimal @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([rateCardItemId, minQuantity])
+  @@index([rateCardItemId, minQuantity])
+  @@map("rate_card_tiers")
+}
+
+// --- Cart and checkout ------------------------------------------------------
+
+/// A basket being assembled, and the checkout details attached to it (SOW BE-05).
+///
+/// One OPEN cart per user per site. A head-office buyer who orders for three
+/// branches keeps three baskets, because the branch decides the budget, the
+/// purchase-order rule and the delivery address — merging them would make every
+/// one of those ambiguous.
+///
+/// **No prices are stored here.** A cart is re-priced on every read through
+/// PricingService, because a rate card can be activated, corrected or expire
+/// between adding a line and paying for it. A stored price would be a quote the
+/// system had silently stopped honouring. Prices are snapshotted exactly once,
+/// onto the order line, at the moment BE-06 turns this into an order.
+model Cart {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  /// The branch this basket is for. Null only while a head-office user has not
+  /// chosen one yet; checkout refuses to proceed without it.
+  siteId String?
+  site   Site?   @relation(fields: [siteId], references: [id])
+
+  status CartStatus @default(OPEN)
+
+  // --- Checkout details, filled in by the stepper (FE-04) -------------------
+
+  /// The customer's purchase-order reference. Whether it is required, and what
+  /// it must start with, is the site's rule falling back to the account's.
+  poNumber String?
+
+  /// Campaign or project attribution, passed through to the ERP journal entry
+  /// by INT-03 and reported on by BE-10.
+  campaignCode String?
+
+  /// Free-text from the buyer, carried onto the order for production.
+  notes String?
+
+  requestedDeliveryDate DateTime? @db.Timestamptz(3)
+
+  shippingAddressId String?
+  shippingAddress   Address? @relation("CartShipTo", fields: [shippingAddressId], references: [id])
+
+  billingAddressId String?
+  billingAddress   Address? @relation("CartBillTo", fields: [billingAddressId], references: [id])
+
+  /// A selector, not a payment processor. Whether the platform ever takes a
+  /// card is still open with the client, so this records the corporate terms
+  /// the order is placed under and nothing more.
+  paymentMethod PaymentMethod?
+
+  /// When the buyer accepted the terms on the review step. Null means they have
+  /// not, and checkout refuses.
+  termsAcceptedAt DateTime? @db.Timestamptz(3)
+
+  /// Set when BE-06 converts this cart into an order, so the basket becomes
+  /// history rather than being deleted and the order can point back at it.
+  checkedOutAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  lines CartLine[]
+  order Order?
+
+  /// The lookup on every cart request: this user's open basket for this site.
+  @@index([accountId, userId, status])
+  @@index([accountId, siteId, status])
+  @@map("carts")
+}
+
+enum CartStatus {
+  OPEN
+  /// Converted into an order by BE-06. Kept for the audit trail.
+  CHECKED_OUT
+  /// Swept up after inactivity, or replaced. Never deleted, so BE-10 can report
+  /// on what customers put down without buying.
+  ABANDONED
+}
+
+/// One line in a basket.
+///
+/// Deliberately **not** uniquely keyed on (cart, product, variant). The same SKU
+/// can legitimately appear twice with different personalisation — two runs of
+/// business cards for two staff members — and a unique index would force the
+/// second one to overwrite the first. The service merges quantities only when
+/// both lines are plain, uncustomised and for the same variant.
+model CartLine {
+  id String @id
+
+  cartId String
+  cart   Cart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  /// The chosen configuration, when the product has options. Null means the
+  /// product is sold as a single unconfigured item.
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  /// In the product's `uom`, and validated against its MOQ and order multiple.
+  /// Stored as the buyer typed it: rounding is reported at validation so they
+  /// see the adjustment, rather than applied silently on the way in.
+  quantity Int
+
+  /// Personalisation captured by the template customiser (FE-03) — artwork
+  /// field values, finish choices, an uploaded asset key. Opaque here; BE-06
+  /// snapshots it onto the order line, and INT-01 sends it to production.
+  customisation Json?
+
+  /// Per-line instruction from the buyer, distinct from the cart-wide note.
+  notes String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([cartId])
+  @@index([productId])
+  @@map("cart_lines")
+}
+
+/// The corporate terms an order is placed under.
+///
+/// A selector only — see the note on `Cart.paymentMethod`.
+enum PaymentMethod {
+  /// Invoiced, payable in 30 days. The default for contract customers.
+  NET_30_INVOICE
+  /// Corporate purchasing card.
+  P_CARD
+  /// Bank transfer.
+  ACH
+}
+
+// --- Orders -----------------------------------------------------------------
+
+/// A placed order (SOW BE-06).
+///
+/// ---------------------------------------------------------------------------
+/// Two status axes, not one
+/// ---------------------------------------------------------------------------
+/// `status` is where the order is in fulfilment; `paymentStatus` is whether it
+/// has been paid. The statement of work lists "Paid" among the lifecycle
+/// states, but folding it in would make DISPATCHED and PAID mutually
+/// exclusive — and on Net 30 terms, which is how most of this trade works, an
+/// order is routinely delivered a month before it is paid. One axis would make
+/// that state unrepresentable.
+///
+/// ---------------------------------------------------------------------------
+/// Everything price-related is a snapshot
+/// ---------------------------------------------------------------------------
+/// The cart deliberately stores no prices, because a rate card can move. An
+/// order is the opposite: the moment it is placed, every number stops moving.
+/// The line items carry their own unit price, the discount that produced it and
+/// the rate card it came from, so re-pricing a historical order is impossible
+/// by construction rather than by convention.
+model Order {
+  id String @id
+
+  /// Human-facing reference, unique across the platform: `ORD-2026-000123`.
+  /// Allocated from a PostgreSQL sequence — see the migration for why gaps in
+  /// it are acceptable and gaplessness is not worth what it would cost.
+  orderNumber String @unique
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// The branch the order is for and billed to. Required — unlike on a cart,
+  /// where it can still be unset while the buyer chooses.
+  siteId String
+  site   Site   @relation(fields: [siteId], references: [id])
+
+  /// Who placed it. The name and email are also snapshotted below, for the same
+  /// reason the audit log copies them: a renamed or deactivated buyer must not
+  /// silently rewrite the record of who ordered what.
+  placedById String
+  placedBy   User   @relation("OrderPlacedBy", fields: [placedById], references: [id])
+
+  placedByName  String
+  placedByEmail String
+
+  /// The basket this came from, kept so a buyer can see what they submitted and
+  /// so a support question can be traced back. Null once an old cart is swept.
+  cartId String? @unique
+  cart   Cart?   @relation(fields: [cartId], references: [id], onDelete: SetNull)
+
+  status OrderStatus @default(DRAFT)
+
+  paymentStatus    PaymentStatus  @default(UNPAID)
+  paymentMethod    PaymentMethod?
+  /// The customer's own payment reference, once finance records one.
+  paymentReference String?
+  paidAt           DateTime?      @db.Timestamptz(3)
+
+  /// The purchase-order reference, validated against the rule in force at the
+  /// time of placing. Kept verbatim: it is quoted on the invoice.
+  poNumber String?
+
+  /// Campaign and project attribution, passed to the ERP journal entry by
+  /// INT-03 and reported on by BE-10.
+  campaignCode String?
+  projectCode  String?
+
+  /// Whether this order needed approval, and the outcome. The routing engine is
+  /// BE-07; what is recorded here is the decision.
+  requiresApproval  Boolean   @default(false)
+  approvedById      String?
+  approvedBy        User?     @relation("OrderApprovedBy", fields: [approvedById], references: [id])
+  approvedAt        DateTime? @db.Timestamptz(3)
+  /// Mandatory when an order is rejected — SOW BE-07 is explicit about it.
+  rejectionReason   String?
+  /// The note attached to a "request changes" decision.
+  changeRequestNote String?
+
+  // --- Money, all snapshotted at placement -----------------------------------
+
+  /// Sum of the line totals. Stored rather than derived so a historical order
+  /// cannot be re-totalled by a later change to a line.
+  subtotal        Decimal @db.Decimal(12, 2)
+  /// What the same order would have cost at catalogue prices, for reporting on
+  /// what contracts are actually saving customers.
+  catalogSubtotal Decimal @db.Decimal(12, 2)
+  /// Tax is not modelled yet — see the note in the migration.
+  total           Decimal @db.Decimal(12, 2)
+
+  /// The rate card in force when this was priced, if any. A soft reference for
+  /// audit: the line items already carry the numbers it produced.
+  rateCardId   String?
+  rateCardName String?
+
+  /// `YYYY-MM`, UTC. The key BE-09 aggregates invoices by, and the window the
+  /// branch's monthly budget is measured over. Stored rather than derived from
+  /// `createdAt` so a period cannot shift if the billing rules ever change.
+  billingPeriod String
+
+  // --- Delivery ---------------------------------------------------------------
+
+  /// The delivery address as chosen, and as a snapshot. The row is referenced
+  /// for the admin UI to link to; the copy is what actually shipped, because an
+  /// address that is later corrected must not rewrite where a past order went.
+  shippingAddressId String?
+  shippingAddress   Address? @relation("OrderShipTo", fields: [shippingAddressId], references: [id])
+  shippingSnapshot  Json
+
+  recipientName  String?
+  recipientPhone String?
+  recipientEmail String?
+
+  requestedDeliveryDate DateTime? @db.Timestamptz(3)
+
+  carrier        String?
+  trackingNumber String?
+  deliveryNotes  String?
+
+  dispatchedAt DateTime? @db.Timestamptz(3)
+  deliveredAt  DateTime? @db.Timestamptz(3)
+  cancelledAt  DateTime? @db.Timestamptz(3)
+
+  /// Buyer's note, carried to production.
+  notes String?
+
+  /// When the buyer accepted the terms, copied from the cart.
+  termsAcceptedAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  lines           OrderLineItem[]
+  history         OrderStatusEvent[]
+  approvalRequest ApprovalRequest?
+
+  /// Order history, newest first — the most common customer-facing read.
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([accountId, siteId, createdAt(sort: Desc)])
+  @@index([accountId, status])
+  @@index([accountId, placedById, createdAt(sort: Desc)])
+  /// The budget query: this branch's committed spend in a period. Ordered so it
+  /// is answered from the index alone.
+  @@index([siteId, billingPeriod, status])
+  /// The approvals queue (BE-07).
+  @@index([status, requiresApproval])
+  @@map("orders")
+}
+
+/// The fulfilment lifecycle.
+///
+/// The reference portal also carries ORDER_PLACED, IN_PRODUCTION and RECEIVED.
+/// Those are partner-pipeline sub-states: ORDER_PLACED is APPROVED here,
+/// IN_PRODUCTION and RECEIVED are stages inside PROCESSING that only the print
+/// producer (INT-01) and the 3PL (INT-02) can report. Inventing transitions for
+/// them before those partner contracts exist would guarantee a rewrite, so
+/// PROCESSING covers the whole production window and the integrations will add
+/// detail underneath it rather than beside it.
+enum OrderStatus {
+  /// Placed but not yet submitted. Reserved for a future "save for later";
+  /// checkout never produces one.
+  DRAFT
+  PENDING_APPROVAL
+  /// An approver asked for changes. The buyer can amend and resubmit.
+  CHANGES_REQUESTED
+  APPROVED
+  /// With production. INT-01 will report finer detail inside this window.
+  PROCESSING
+  DISPATCHED
+  DELIVERED
+  /// Refused by an approver. Terminal, and always carries a reason.
+  REJECTED
+  /// Withdrawn by the customer or by an administrator. Terminal.
+  CANCELLED
+}
+
+/// Whether the money has arrived. Deliberately independent of `OrderStatus` —
+/// see the note on the model.
+enum PaymentStatus {
+  UNPAID
+  PAYMENT_PENDING
+  PAID
+  REFUNDED
+}
+
+/// One ordered line, frozen at the moment of placement.
+///
+/// Every field that could change upstream is copied, not joined: the product
+/// name and SKU, the print specification, the unit price and the rule that
+/// produced it. A product renamed or repriced next year must not alter what an
+/// invoice from this year says.
+model OrderLineItem {
+  id String @id
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Referenced so the UI can link through to the catalogue, but never read for
+  /// any value that appears on the order.
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  // --- Snapshot ---------------------------------------------------------------
+
+  sku        String
+  name       String
+  variantSku String?
+  uom        UnitOfMeasure
+  packSize   Int
+
+  /// The quantity actually ordered — already rounded to the product's MOQ and
+  /// order multiple by the cart.
+  quantity Int
+
+  unitPrice        Decimal @db.Decimal(12, 2)
+  lineTotal        Decimal @db.Decimal(12, 2)
+  /// What the line would have cost with no rate card, for savings reporting.
+  catalogUnitPrice Decimal @db.Decimal(12, 2)
+  discountPercent  Decimal @db.Decimal(5, 2)
+  /// Which pricing rule produced the unit price — the same vocabulary
+  /// `PriceSource` uses in the pricing module. Stored as text because it is a
+  /// record of what happened, and a later change to the rule set must not
+  /// invalidate rows that recorded the old one.
+  priceSource      String
+
+  /// Print specification, copied so INT-01 sends production exactly what was
+  /// ordered even if the product is later respecified.
+  widthMm      Int?
+  heightMm     Int?
+  bleedMm      Decimal? @db.Decimal(5, 2)
+  safeMarginMm Decimal? @db.Decimal(5, 2)
+
+  /// Personalisation from the template customiser, carried through unchanged.
+  customisation Json?
+  notes         String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_line_items")
+}
+
+/// Every status change, with who made it.
+///
+/// Separate from the audit log on purpose. The audit log is a compliance record
+/// covering every entity in the system; this is the order's own timeline, shown
+/// to the customer on the order detail page (FE-05), and it is read on a hot
+/// path that must not scan a table holding every mutation the platform has ever
+/// made. The actor is snapshotted here for the same reason it is there.
+model OrderStatusEvent {
+  id String @id
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Null for the first event, which records the order being created.
+  fromStatus OrderStatus?
+  toStatus   OrderStatus
+
+  actorId   String?
+  actorName String
+  actorRole PortalRole
+  /// Free text from the actor: a rejection reason, a dispatch note.
+  comment   String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_events")
+}
+
+// --- Approvals --------------------------------------------------------------
+
+/// One configurable reason an order needs a decision, and who makes it
+/// (SOW BE-07).
+///
+/// ---------------------------------------------------------------------------
+/// Rules are conditions, not a workflow
+/// ---------------------------------------------------------------------------
+/// Each row says "when an order looks like *this*, someone at tier N must
+/// approve it". Several can match one order; their tiers are collected, sorted
+/// and walked in turn. That is deliberately simpler than a graph: a customer's
+/// finance policy is a list of thresholds and exceptions, not a flowchart, and
+/// a graph would let an administrator build an unreachable state nobody notices
+/// until an order is stuck in it.
+///
+/// A rule with no conditions at all matches every order, which is how "all
+/// orders need head-office sign-off" is expressed.
+model ApprovalRule {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  /// What the administrator calls it — "Over $1,000", "All print for VIC".
+  name        String
+  description String?
+
+  active Boolean @default(true)
+
+  // --- Triggers. Null means "does not constrain". All present ones must match.
+
+  /// Order total at or above this. `Account.approvalThreshold` remains the
+  /// simple case; this is the configurable one that supersedes it when rules
+  /// exist for the account.
+  minTotal Decimal? @db.Decimal(12, 2)
+
+  /// Any line in this category. The most common non-monetary trigger: branded
+  /// stationery goes through marketing whatever it costs.
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId], references: [id])
+
+  /// Only orders raised by someone in this role.
+  requesterRole PortalRole?
+
+  /// Only orders for this branch.
+  siteId String?
+  site   Site?   @relation(fields: [siteId], references: [id])
+
+  // --- Routing ---------------------------------------------------------------
+
+  /// Which round of approval this rule contributes. Tiers are walked lowest
+  /// first, and every step in a tier must be decided before the next opens.
+  tier Int @default(1)
+
+  /// Who may decide. Exactly one of these is set — the service refuses a rule
+  /// that names neither, because a rule with no approver would strand every
+  /// order it matched.
+  approverRole   PortalRole?
+  approverUserId String?
+  approverUser   User?       @relation("ApprovalRuleApprover", fields: [approverUserId], references: [id])
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  steps ApprovalStep[]
+
+  @@index([accountId, active, tier])
+  @@map("approval_rules")
+}
+
+/// One order's journey through approval.
+///
+/// Created when an order is placed and at least one rule matches. Holds the
+/// tier currently open; the steps hold the decisions.
+model ApprovalRequest {
+  id String @id
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id])
+
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  status ApprovalStatus @default(PENDING)
+
+  /// The tier whose steps are open for decision. Advances only when every step
+  /// in it is approved.
+  currentTier Int @default(1)
+
+  /// The order total when the request was raised. Kept because a resubmitted
+  /// order can be a different size, and the record of what each round was
+  /// deciding on must not move under it.
+  totalAtRequest Decimal @db.Decimal(12, 2)
+
+  completedAt DateTime? @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  steps ApprovalStep[]
+
+  @@index([accountId, status, currentTier])
+  @@map("approval_requests")
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  /// An approver asked the buyer for changes. The request waits; resubmitting
+  /// starts a fresh one rather than resuming this, because the order it was
+  /// deciding on no longer exists in the same form.
+  CHANGES_REQUESTED
+  /// The order was cancelled or withdrawn underneath it.
+  CANCELLED
+}
+
+/// One person's decision, or the absence of it.
+///
+/// A step is created for every rule that matched, at the tier that rule names.
+/// `approverRole` steps are open to anyone in the account holding that role;
+/// `approverUserId` steps name one person.
+model ApprovalStep {
+  id String @id
+
+  requestId String
+  request   ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  /// The rule that produced this step. Nullable so a rule can be retired
+  /// without erasing the history of what it once required.
+  ruleId String?
+  rule   ApprovalRule? @relation(fields: [ruleId], references: [id])
+
+  tier Int
+
+  /// Copied from the rule, so retiring or editing the rule cannot rewrite who
+  /// this step was addressed to.
+  approverRole   PortalRole?
+  approverUserId String?
+  approverUser   User?       @relation("ApprovalStepApprover", fields: [approverUserId], references: [id])
+
+  status ApprovalStepStatus @default(PENDING)
+
+  decidedById   String?
+  decidedBy     User?     @relation("ApprovalStepDecider", fields: [decidedById], references: [id])
+  /// Snapshotted, like every other actor in this system.
+  decidedByName String?
+  decidedAt     DateTime? @db.Timestamptz(3)
+  comment       String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([requestId, tier])
+  @@index([approverUserId, status])
+  @@map("approval_steps")
+}
+
+enum ApprovalStepStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CHANGES_REQUESTED
+  /// A later tier that never opened because an earlier one rejected, or a step
+  /// whose rule was satisfied by another decision.
+  SKIPPED
 }

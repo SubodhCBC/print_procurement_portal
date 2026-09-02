@@ -4,6 +4,7 @@ import { ConfigValidationError, parseConfig } from './configuration';
 const validEnv: NodeJS.ProcessEnv = {
   APP_ENV: 'development',
   DATABASE_URL: 'postgresql://user:pass@localhost:5432/db?schema=public',
+  LEGACY_DATABASE_URL: 'sqlserver://legacy.example:1433;database=Legacy;user=sa;password=pw',
   REDIS_URL: 'redis://localhost:6379',
   S3_ENDPOINT: 'http://localhost:9000',
   S3_BUCKET: 'assets',

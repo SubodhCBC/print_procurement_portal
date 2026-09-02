@@ -1,0 +1,1179 @@
+// ---------------------------------------------------------------------------
+// LEGACY database — Ticket-IT (Azure SQL Server). READ-ONLY.
+//
+// This file is INTROSPECTED, not authored: it is the shape of a database this
+// service does not own. Regenerate it with `npm run legacy:pull`; never hand-
+// edit a model and never write a migration against it.
+//
+// Nothing in the application may write here. That is enforced three ways:
+//   1. this client is generated to its own output, so it can never be reached
+//      by accident through the app's `PrismaService`;
+//   2. LegacyPrismaService only exposes a client wrapped in the read-only
+//      extension (src/database/legacy/read-only.extension.ts), which throws on
+//      every mutating operation;
+//   3. the SQL login should additionally be granted db_datareader only — the
+//      two guards above are application-level and cannot bind a DBA's hands.
+//
+// Only the authentication path reads from here. See src/modules/auth.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
+  // Separate output: the app's own client keeps the default location, so
+  // `import { PrismaClient } from '@prisma/client'` can never resolve to the
+  // legacy database.
+  output          = "../../../../node_modules/@prisma/legacy-client"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("LEGACY_DATABASE_URL")
+}
+
+model MigrationHistory {
+  MigrationId    String @db.NVarChar(150)
+  ContextKey     String @db.NVarChar(300)
+  Model          Bytes
+  ProductVersion String @db.NVarChar(32)
+
+  @@id([MigrationId, ContextKey], map: "PK_dbo.__MigrationHistory")
+  @@map("__MigrationHistory")
+}
+
+model APIBatchImportSessions {
+  Id                 Int       @id(map: "PK_APIBatchImportSessions") @default(autoincrement())
+  BatchSessionToken  String?   @db.NVarChar(64)
+  BatchToken         String    @db.NVarChar(64)
+  BatchId            Int?
+  BatchName          String?   @db.NVarChar(512)
+  BatchNotes         String?   @db.NVarChar(Max)
+  StartDate          DateTime? @db.DateTime
+  EndDate            DateTime? @db.DateTime
+  SessionTokenExpiry DateTime? @db.DateTime
+  UserId             Int
+}
+
+model AzureDatasourceFolderSettings {
+  Id                            Int                             @id(map: "PK_AzureDatasourceFolderSettings") @default(autoincrement())
+  DynamicClientId               Int
+  AccessUrl                     String                          @db.NVarChar(512)
+  AccessToken                   String                          @db.NVarChar(2048)
+  CoreDatasourceId              Int?
+  LastFilenameSync              String?                         @db.NVarChar(1024)
+  CoreDatasources               CoreDatasources?                @relation(fields: [CoreDatasourceId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_AzureDatasourceFolderSettings_CoreDatasources")
+  DynamicClients                DynamicClients                  @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_AzureDatasourceFolderSettings_DynamicClients")
+  AzureDatasourceProcessedFiles AzureDatasourceProcessedFiles[]
+}
+
+model AzureDatasourceProcessedFiles {
+  Id                              Int                           @id(map: "PK_AzureDatasourceProcessedFiles") @default(autoincrement())
+  Filename                        String                        @db.NVarChar(2048)
+  DateProcessed                   DateTime                      @db.DateTime
+  IsCompleted                     Boolean
+  AzureDatasourceFolderSettingsId Int
+  IsBatch                         Boolean                       @default(false, map: "DF_AzureDatasourceProcessedFiles_IsBatch")
+  AzureDatasourceFolderSettings   AzureDatasourceFolderSettings @relation(fields: [AzureDatasourceFolderSettingsId], references: [Id], onUpdate: NoAction, map: "FK_AzureDatasourceProcessedFiles_AzureDatasourceFolderSettings")
+}
+
+model BatchDataFilterItems {
+  Id               Int              @id(map: "PK_BatchDataFilterItems") @default(autoincrement())
+  BatchFilterId    Int
+  FieldName        String           @db.NVarChar(Max)
+  FieldValue       String?          @db.NVarChar(Max)
+  IsInclude        Boolean?         @default(false, map: "DF__BatchData__IsInc__03A67F89")
+  IsExactMatch     Boolean?         @default(false, map: "DF__BatchData__IsExa__049AA3C2")
+  BatchDataFilters BatchDataFilters @relation(fields: [BatchFilterId], references: [Id], onUpdate: NoAction, map: "FK_BatchDataFilterItems_BatchDataFilters")
+}
+
+model BatchDataFilters {
+  Id                   Int                    @id(map: "PK_BatchDataFilters") @default(autoincrement())
+  ClientName           String                 @db.NVarChar(512)
+  BatchFilterName      String                 @db.NVarChar(1024)
+  IsDefaultFilter      Boolean?               @default(false, map: "DF__BatchData__IsDef__00CA12DE")
+  IsAdminFilter        Boolean                @default(false, map: "DF__BatchData__IsAdm__353DDB1D")
+  FilterCreatedBy      Int                    @default(0, map: "DF__BatchData__Filte__3631FF56")
+  BatchDataFilterItems BatchDataFilterItems[]
+}
+
+model Batches {
+  Id                     Int                  @id(map: "PK_dbo.Batches") @default(autoincrement())
+  Data                   String?              @db.NVarChar(Max)
+  Name                   String               @db.NVarChar(256)
+  Notes                  String?              @db.NVarChar(1024)
+  DateFrom               DateTime             @db.DateTime
+  DateTo                 DateTime             @db.DateTime
+  LastEdited             DateTime             @db.DateTime
+  IsPrinted              Boolean
+  IsRecalled             Boolean
+  IsDeleted              Boolean
+  MasterBatchId          Int?
+  Client                 String               @db.NVarChar(96)
+  UserId                 Int
+  PublishDate            DateTime?            @db.DateTime
+  Type                   Int                  @default(0, map: "DF__Batches__Type__6D0D32F4")
+  ProductAmount          Int                  @default(0, map: "DF__Batches__Product__6E01572D")
+  BatchZone              String?              @db.NVarChar(64)
+  IsOnTheGo              Boolean              @default(false, map: "DF_Batches_IsOnTheGo")
+  IsClearanceForBriscoes Boolean              @default(false, map: "DF__Batches__IsClear__62E4AA3C")
+  BatchUploadStatus      String?              @db.NVarChar(32)
+  UploadJobId            String?              @db.NVarChar(64)
+  Batches                Batches?             @relation("BatchesToBatches", fields: [MasterBatchId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_dbo.Batches_dbo.Batches_MasterBatchId")
+  other_Batches          Batches[]            @relation("BatchesToBatches")
+  Users                  Users                @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_dbo.Batches_dbo.Users_UserId")
+  BatchNotifications     BatchNotifications[]
+  VersionBatches         VersionBatches[]
+
+  @@index([UserId], map: "IX_Batches_UserId")
+}
+
+model BatchImportSessions {
+  Id         Int      @id(map: "PK_BatchImportSessions") @default(autoincrement())
+  SessionKey String   @db.NVarChar(64)
+  BatchId    Int
+  Expiry     DateTime @db.DateTime
+  Username   String?  @db.NVarChar(Max)
+}
+
+model BatchNotifications {
+  Id               Int      @id(map: "PK_dbo.BatchNotifications") @default(autoincrement())
+  SendTime         DateTime @db.DateTime
+  BatchId          Int
+  IsSent           Boolean
+  Email            String   @db.NVarChar(128)
+  Subject          String   @db.NVarChar(128)
+  Body             String   @db.NVarChar(2048)
+  LastErrorMessage String?  @db.NVarChar(Max)
+  RetryAttempts    Int      @default(0, map: "DF_BatchNotifications_RetryAttempts")
+  Batches          Batches  @relation(fields: [BatchId], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_dbo.BatchNotifications_dbo.Batches_BatchId")
+}
+
+model ClientConfigs {
+  Id              Int               @id(map: "PK_dbo.ClientConfigs") @default(autoincrement())
+  ClientName      String            @db.NVarChar(Max)
+  Fields          String            @db.NVarChar(Max)
+  CoreDatasources CoreDatasources[]
+}
+
+model ClientInvoices {
+  Id                 Int            @id(map: "PK_ClientInvoice") @default(autoincrement())
+  ClientName         String         @db.NVarChar(128)
+  ReportClientName   String         @db.NVarChar(128)
+  DynamicClientId    Int
+  NoOfStores         Int            @default(0, map: "DF__ClientInv__NoOfS__74CE504D")
+  ValuePerStore      Decimal        @default(0, map: "DF__ClientInv__Value__75C27486") @db.Decimal(18, 2)
+  NoOfIntegrations   Int?           @default(0, map: "DF__ClientInv__NoOfI__76B698BF")
+  TotalIntegrations  Int?           @default(0, map: "DF__ClientInv__Total__77AABCF8")
+  DiscountPercentage Decimal?       @default(0, map: "DF__ClientInv__Disco__789EE131") @db.Decimal(18, 2)
+  GST                Decimal?       @default(0, map: "DF__ClientInvoi__GST__7993056A") @db.Decimal(18, 2)
+  TotalInvoice       Decimal?       @default(0, map: "DF__ClientInv__Total__7A8729A3") @db.Decimal(18, 2)
+  PartnerName        String?        @db.NVarChar(128)
+  CreditType         Int?
+  InvoicePerMonth    Decimal?       @default(0, map: "DF__ClientInv__Invoi__7B7B4DDC") @db.Decimal(18, 2)
+  ResellerInvoice    Decimal?       @default(0, map: "DF__ClientInv__Resel__7C6F7215") @db.Decimal(18, 2)
+  DynamicClients     DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_ClientInvoices_DynamicClientId")
+}
+
+model CoreDatasources {
+  Id                            Int                             @id(map: "PK_dbo.CoreDatasources") @default(autoincrement())
+  FileName                      String?                         @db.NVarChar(128)
+  FileDescription               String?                         @db.NVarChar(64)
+  ClientConfigId                Int
+  DepartmentId                  Int
+  Priority                      Int                             @default(0, map: "DF_CoreDatasources_Priority")
+  UpdateType                    Int                             @default(0, map: "DF_CoreDatasources_UpdateType")
+  UserId                        Int?
+  GroupId                       Int?
+  ParentDataSourceId            Int?
+  Status                        Int                             @default(2, map: "DF_CoreDatasources_Status")
+  UploaderEmail                 String?                         @db.NVarChar(128)
+  IsSubCoreDatasource           Boolean                         @default(false, map: "DF_CoreDatasources_IsSubCoreDatasource")
+  IsUpdateOnly                  Boolean                         @default(false, map: "DF_CoreDatasources_IsUpdateOnly")
+  IsAPIUpdate                   Boolean                         @default(false, map: "DF_CoreDatasources_IsAPIUpdate")
+  APIName                       String?                         @db.NVarChar(128)
+  IsPeriodicUpdateEnabled       Boolean                         @default(false, map: "DF_CoreDatasources_IsPeriodicUpdateEnabled")
+  SuccessCount                  Int?                            @default(0, map: "DF__CoreDatas__Succe__664B26CC")
+  DuplicateCount                Int?                            @default(0, map: "DF__CoreDatas__Dupli__673F4B05")
+  CurrentToken                  String?                         @db.NVarChar(256)
+  ErrorMessage                  String?                         @db.NVarChar(Max)
+  ActiveWebhookId               String?                         @db.NVarChar(1026)
+  IsEslUpdateEnabled            Boolean                         @default(false, map: "DF_CoreDatasources_IsEslUpdateEnabled")
+  DataFieldsToAPIMappings       String?                         @db.NVarChar(Max)
+  AzureDatasourceFolderSettings AzureDatasourceFolderSettings[]
+  CoreDatasources               CoreDatasources?                @relation("CoreDatasourcesToCoreDatasources", fields: [ParentDataSourceId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_CoreDatasources_CoreDatasources")
+  other_CoreDatasources         CoreDatasources[]               @relation("CoreDatasourcesToCoreDatasources")
+  Groups                        Groups?                         @relation(fields: [GroupId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_CoreDatasources_Groups")
+  Users                         Users?                          @relation(fields: [UserId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_CoreDatasources_Users")
+  ClientConfigs                 ClientConfigs                   @relation(fields: [ClientConfigId], references: [Id], onUpdate: NoAction, map: "FK_dbo.CoreDatasources_dbo.ClientConfigs_ClientConfigId")
+}
+
+model CoreReferenceFields {
+  Id                       Int            @id(map: "PK_dbo.CoreReferenceFields") @default(autoincrement())
+  DynamicClientId          Int
+  Client                   String         @db.NVarChar(252)
+  CoreReferenceFieldName   String         @db.NVarChar(252)
+  CoreReferenceFieldValues String?        @db.NVarChar(Max)
+  DynamicClients           DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_CoreReferenceFields_DynamicClients")
+}
+
+model Departments {
+  Id             Int              @id(map: "PK_dbo.Departments") @default(autoincrement())
+  Name           String?          @db.NVarChar(Max)
+  Client         String           @db.NVarChar(Max)
+  UserDepartment UserDepartment[]
+}
+
+model DynamicClients {
+  Id                                     Int                             @id(map: "PK_dbo.DynamicClients") @default(autoincrement())
+  Name                                   String                          @db.NVarChar(Max)
+  DisplayName                            String                          @db.NVarChar(Max)
+  BatchEmailURL                          String                          @default("", map: "DF__DynamicCl__Batch__6EF57B66") @db.NVarChar(Max)
+  TemplateSettings                       String                          @default("", map: "DF__DynamicCl__Templ__6FE99F9F") @db.NVarChar(Max)
+  ContentBasePath                        String                          @default("", map: "DF__DynamicCl__Conte__70DDC3D8") @db.NVarChar(Max)
+  DataBasePath                           String                          @default("", map: "DF__DynamicCl__DataB__71D1E811") @db.NVarChar(Max)
+  Regions                                String                          @default("", map: "DF__DynamicCl__Regio__72C60C4A") @db.NVarChar(Max)
+  LogoName                               String                          @default("", map: "DF__DynamicCl__LogoN__73BA3083") @db.NVarChar(Max)
+  FontMap                                String                          @default("", map: "DF__DynamicCl__FontM__74AE54BC") @db.NVarChar(Max)
+  FieldData                              String                          @default("", map: "DF__DynamicCl__Field__75A278F5") @db.NVarChar(Max)
+  IsDisabledFranchiseeBatchEdit          Boolean                         @default(false, map: "DF_DynamicClients_IsDisabledFranchiseeBatchEdit")
+  AllowFranchiseeBatches                 Boolean                         @default(false, map: "DF_DynamicClients_AllowFranchiseeBatches")
+  AllowFranchiseeCoreDatasources         Boolean                         @default(false, map: "DF_DynamicClients_AllowFranchiseeCoreDatasources")
+  HasZonePricing                         Boolean                         @default(false, map: "DF_DynamicClients_HasZonePricing")
+  ZoneNames                              String?                         @db.NVarChar(Max)
+  BatchEmailTemplate                     String?                         @db.NVarChar(Max)
+  IsDisabledBatchSummaries               Boolean                         @default(false, map: "DF_DynamicClients_IsDisabledBatchSummaries")
+  AllowUsersChangeBatchZone              Boolean                         @default(false, map: "DF_DynamicClients_AllowUsersChangeBatchZone")
+  HideFranchiseeZeroQuantyTickets        Boolean                         @default(false, map: "DF_DynamicClients_HideFranchiseeZeroQuantyTickets")
+  FranchiseeBatchCreateTemplatePath      String?                         @db.NVarChar(Max)
+  CoreSearchFieldsData                   String?                         @db.NVarChar(Max)
+  AllowSubCoreDatasources                Boolean                         @default(false, map: "DF_DynamicClients_AllowSubCoreDatasources")
+  CorePreferredProductName               String?                         @db.NVarChar(128)
+  CoreSecondaryProductName               String?                         @db.NVarChar(128)
+  IsUsingVendApi                         Boolean                         @default(false, map: "DF_DynamicClients_IsUsingVendApi")
+  IsUsingRetailExpressApi                Boolean                         @default(false, map: "DF_DynamicClients_IsUsingRetailExpressApi")
+  IsUsingKMMSApi                         Boolean                         @default(false, map: "DF_DynamicClients_IsUsingKMMSApi")
+  VendApiKey                             String?                         @db.NVarChar(256)
+  RetailExpressApiKey                    String?                         @db.NVarChar(256)
+  KMMSApiKey                             String?                         @db.NVarChar(256)
+  VendTokenExpiry                        DateTime?                       @db.DateTime
+  VendDomainPrefix                       String?                         @db.NVarChar(256)
+  VendAccessToken                        String?                         @db.NVarChar(256)
+  VendRefreshToken                       String?                         @db.NVarChar(256)
+  VendHighestProductVers                 BigInt?
+  IsProductSync                          Boolean                         @default(false, map: "DF_DynamicClients_IsProductSync")
+  IsUsingShopfrontApi                    Boolean                         @default(false, map: "DF_DynamicClients_IsUsingShopfrontApi")
+  ShopfrontApiKey                        String?                         @db.NVarChar(256)
+  ShopfrontTokenExpiry                   DateTime?                       @db.DateTime
+  ShopfrontDomainPrefix                  String?                         @db.NVarChar(256)
+  ShopfrontAccessToken                   String?                         @db.NVarChar(Max)
+  ShopfrontRefreshToken                  String?                         @db.NVarChar(Max)
+  ShopfrontRedirectUrl                   String?                         @db.NVarChar(512)
+  VendRedirectUrl                        String?                         @db.NVarChar(512)
+  VendClientId                           String?                         @db.NVarChar(256)
+  VendClientSecret                       String?                         @db.NVarChar(256)
+  ShopfrontClientId                      String?                         @db.NVarChar(256)
+  ShopfrontClientSecret                  String?                         @db.NVarChar(256)
+  IsOnTheGoEnabled                       Boolean                         @default(false, map: "DF_DynamicClients_IsOnTheGoEnabled")
+  REXUsername                            String?                         @db.NVarChar(128)
+  REXPassword                            String?                         @db.NVarChar(128)
+  REXClientId                            String?                         @db.NVarChar(256)
+  REXDomainPrefix                        String?                         @db.NVarChar(256)
+  REXChannelId                           Int?
+  REXLastUpdated                         DateTime?                       @db.DateTime
+  IsUsingREXApi                          Boolean                         @default(false, map: "DF_DynamicClients_IsUsingREXApi")
+  REXApiKey                              String?                         @db.NVarChar(128)
+  REXTokenExpiry                         DateTime?                       @db.DateTime
+  REXAccessToken                         String?                         @db.NVarChar(2048)
+  IsDisabledImageManagement              Boolean                         @default(true, map: "DF__DynamicCl__IsDis__0D0FEE32")
+  IsDisabledImageManagementForFranchisee Boolean                         @default(true, map: "DF__DynamicCl__IsDis__0E04126B")
+  ApiTimezoneId                          String?                         @db.NVarChar(256)
+  LastApiCheckDateTime                   DateTime?                       @db.DateTime
+  IsNewBatchViewEnabled                  Boolean                         @default(true, map: "DF__DynamicCl__IsNew__2116E6DF")
+  IsUsingCountrHQApi                     Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__220B0B18")
+  CountrHQUserName                       String?                         @db.NVarChar(128)
+  CountrHQPassword                       String?                         @db.NVarChar(128)
+  CountrHQClientId                       String?                         @db.NVarChar(256)
+  CountrHQChannelId                      Int?
+  CountrHQDomainPrefix                   String?                         @db.NVarChar(256)
+  CountrHQLastUpdate                     DateTime?                       @db.DateTime
+  CountrHQApiKey                         String?                         @db.NVarChar(128)
+  CountrHQTokenExpiry                    DateTime?                       @db.DateTime
+  CountrHQAccessToken                    String?                         @db.NVarChar(2048)
+  CountrHQClientSecret                   String?                         @db.NVarChar(256)
+  CountrHQRefreshToken                   String?                         @db.NVarChar(256)
+  CountrHQRedirectUrl                    String?                         @db.NVarChar(512)
+  ShopfrontState                         String?                         @db.NVarChar(526)
+  RedirectToShopfrontIntegrate           String?                         @db.NVarChar(256)
+  HasInventoryStockTracking              Boolean                         @default(false, map: "DF_DynamicClients_HasInventoryStockTracking")
+  DearAccountId                          String?                         @db.NVarChar(2048)
+  DearApplicationKey                     String?                         @db.NVarChar(Max)
+  IsUsingDearApi                         Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__46486B8E")
+  DearLastUpdated                        DateTime?                       @db.DateTime
+  XmlUrl                                 String?                         @db.NVarChar(Max)
+  TraningVideoLink                       String?                         @db.NVarChar(Max)
+  IsDatasourceSyncFromAzure              Boolean                         @default(false, map: "DF_DynamicClients_IsDatasourceSyncFromAzure")
+  HasBatchImport                         Boolean                         @default(false, map: "DF_DynamicClients_HasBatchImport")
+  AuthKey                                String?                         @db.NVarChar(Max)
+  HasInventoryStockTrackingHO            Boolean                         @default(false, map: "DF__DynamicCl__HasIn__119F9925")
+  VendHighestConsignmentVers             BigInt?
+  DataFieldsToAPIMappings                String?                         @db.NVarChar(Max)
+  REXAPIFields                           String                          @default("id,supplier_sku,manufacturer_sku,supplier_sku2,short_description,length,breadth,depth,sell_price_inc,custom_properties.Custom1,custom_properties.Custom2,custom_properties.Custom3,weight,attribute.Colour,attribute.Size,attribute.Season,attribute.Brand,attribute.Range,attribute.Description, attribute.Volume,attribute.Dimensions,attribute.Colour Ticket It,promotional_price_expiry,promotional_price_inc,rrp_inc,supplier.name", map: "DF_DynamicClient_REXAPIFields") @db.NVarChar(Max)
+  VendAPIFields                          String?                         @db.NVarChar(Max)
+  ShopfrontAPIFields                     String?                         @db.NVarChar(Max)
+  DearAPIFields                          String?                         @db.NVarChar(Max)
+  CountrAPIFields                        String?                         @db.NVarChar(Max)
+  CoreReportFields                       String?                         @db.NVarChar(Max)
+  CoreSearchAttributeFields              String?                         @db.NVarChar(Max)
+  HasTemplateGroupingForHO               Boolean                         @default(false, map: "DF__DynamicCl__HasTe__24B26D99")
+  HasTemplateGroupingForStore            Boolean                         @default(false, map: "DF__DynamicCl__HasTe__25A691D2")
+  SignupCode                             String?                         @db.NVarChar(Max)
+  REXITOLastUpdated                      DateTime?                       @db.DateTime
+  IsUsingNetsuiteApi                     Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__17236851")
+  NetsuiteAccountId                      String?                         @db.NVarChar(256)
+  NetsuiteConsumerKey                    String?                         @db.NVarChar(512)
+  NetsuiteConsumerSecret                 String?                         @db.NVarChar(512)
+  NetsuiteTokenId                        String?                         @db.NVarChar(512)
+  NetsuiteTokenSecret                    String?                         @db.NVarChar(512)
+  NetsuiteApiFields                      String?                         @db.NVarChar(512)
+  NetsuiteLastUpdated                    DateTime?                       @db.DateTime
+  EziUserName                            String?                         @db.NVarChar(512)
+  EziPassword                            String?                         @db.NVarChar(512)
+  IsUsingEziApi                          Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__2A363CC5")
+  EziAPIFields                           String?                         @db.NVarChar(Max)
+  EziLastPrintedDate                     DateTime?                       @db.DateTime
+  PrintRequestType                       Int?                            @default(0, map: "DF__DynamicCl__Print__2C1E8537")
+  WorldsmartGmAppKey                     String?                         @db.NVarChar(2048)
+  WorldsmartAuthorizationToken           String?                         @db.NVarChar(Max)
+  IsUsingWorldsmartApi                   Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__505BE5AD")
+  WorldsmartAPIFields                    String?                         @db.NVarChar(Max)
+  WorldsmartAppUsername                  String?                         @db.NVarChar(256)
+  WorldsmartAppPassword                  String?                         @db.NVarChar(256)
+  WorldsmartApiUsername                  String?                         @db.NVarChar(256)
+  WorldsmartApiPassword                  String?                         @db.NVarChar(256)
+  WorldsmartLastModified                 DateTime?                       @db.DateTime
+  CanOutputToSolum                       Boolean                         @default(false, map: "DF_DynamicClients_IsOutputToSolum")
+  ESLInstallerCode                       String?                         @db.NVarChar(Max)
+  LatestESLFileProcessed                 String?                         @db.NVarChar(Max)
+  IsUsingEzyVetApi                       Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__5C8CB268")
+  HasEnableSavedTemplateStates           Boolean                         @default(true, map: "DF__DynamicCl__HasEn__2D9CB955")
+  IsUsingMagentaApi                      Boolean                         @default(false, map: "DF__DynamicCl__IsUsi__5C57A83E")
+  MagentaUserName                        String?                         @db.NVarChar(512)
+  MagentaPassword                        String?                         @db.NVarChar(512)
+  MagentaLastModified                    DateTime?                       @db.DateTime
+  IsUsingFTPApi                          Boolean?
+  MagentaLastExtractGuid                 String?                         @db.NVarChar(512)
+  IsUsingShopifyApi                      Boolean?                        @default(false, map: "DF__DynamicCl__IsUsi__40457975")
+  IsUsingSwiftPOSApi                     Boolean?                        @default(false, map: "DF__DynamicCl__IsUsi__002AF460")
+  AzureDatasourceFolderSettings          AzureDatasourceFolderSettings[]
+  ClientInvoices                         ClientInvoices[]
+  CoreReferenceFields                    CoreReferenceFields[]
+  DynamicClientSOHSFTPConfig             DynamicClientSOHSFTPConfig[]
+  EslSkuMappings                         EslSkuMappings[]
+  EslToTemplateMappings                  EslToTemplateMappings[]
+  EslUpdates                             EslUpdates[]
+  EzyVetIntegrations                     EzyVetIntegrations[]
+  FtpConfigurationDetails                FtpConfigurationDetails[]
+  ShopifyIntegrations                    ShopifyIntegrations[]
+  SolumSettings                          SolumSettings[]
+  StockIngestionQueue                    StockIngestionQueue[]
+  StockMappingProfile                    StockMappingProfile[]
+  StockOnHand_LoadLog                    StockOnHand_LoadLog[]
+  SwiftPOSIntegrations                   SwiftPOSIntegrations[]
+  UserIntegrations                       UserIntegrations[]
+  ZkongAPISettings                       ZkongAPISettings[]
+  ZkongEslLCD                            ZkongEslLCD[]
+  ZkongEslToTemplateMappings             ZkongEslToTemplateMappings[]
+  ZkongLCDCampaign                       ZkongLCDCampaign[]
+}
+
+model DynamicClientSOHSFTPConfig {
+  Id                 Int            @id(map: "PK__DynamicC__3214EC0711E74F01") @default(autoincrement())
+  DynamicClientId    Int
+  UserId             Int?
+  Host               String         @db.VarChar(256)
+  Port               Int?           @default(22, map: "DF__DynamicCli__Port__45C948A1")
+  Username           String         @db.VarChar(128)
+  Password           String?        @db.VarChar(256)
+  RemotePath         String         @db.VarChar(512)
+  ArchivePath        String?        @db.VarChar(512)
+  KeyVaultSecretName String?        @db.VarChar(256)
+  SkuMatchField      String?        @db.NVarChar(100)
+  DynamicClients     DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_DynamicClientSOHSFTPConfig_DynamicClient")
+}
+
+model EslReports {
+  Id                  Int       @id(map: "PK_EslReports") @default(autoincrement())
+  ClientName          String    @db.NVarChar(512)
+  ProductSKU          String    @db.NVarChar(512)
+  ESLBarcode          String?   @db.NVarChar(512)
+  ProductDescription  String?   @db.NVarChar(Max)
+  DAYSTANDARDPRICE    String?   @db.NVarChar(250)
+  NIGHTSTANDARDPRICE  String?   @db.NVarChar(250)
+  DAYPROMOPRICE       String?   @db.NVarChar(250)
+  NIGHTPROMOPRICE     String?   @db.NVarChar(250)
+  StandardPrice       String?   @db.NVarChar(250)
+  PromoPrice          String?   @db.NVarChar(250)
+  DateCreated         DateTime? @db.DateTime
+  ProductLastModified DateTime? @db.DateTime
+  ESLLastModified     DateTime? @db.DateTime
+  PromoStart          DateTime? @db.DateTime
+  PromoEnd            DateTime? @db.DateTime
+  FTPFileName         String?   @db.NVarChar(Max)
+}
+
+model EslSkuMappings {
+  Id                         Int            @id(map: "PK_EslSkuMappings") @default(autoincrement())
+  TicketItSKU                String         @db.NVarChar(512)
+  SolumnId                   String         @db.NVarChar(512)
+  DynamicClientId            Int
+  Width                      Int            @default(0, map: "DF_EslSkuMappings_Width")
+  Height                     Int            @default(0, map: "DF_EslSkuMappings_Height")
+  TemplateName               String?        @db.NVarChar(Max)
+  LastScheduleUpdate         DateTime?      @db.DateTime
+  IsSpecificTemplateForLabel Boolean        @default(false, map: "DF_EslSkuMappings_IsSpecificTemplateForLabel")
+  DynamicClients             DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_EslSkuMappings_DynamicClients")
+}
+
+model EslSyncQueues {
+  Id                    Int       @id(map: "PK_EslSyncQueue") @default(autoincrement())
+  SolumLabelId          String    @db.NVarChar(Max)
+  IsBatch               Boolean?  @default(false, map: "DF_EslSyncQueue_IsBatch")
+  TicketItSku           String    @db.NVarChar(Max)
+  PatchedData           String    @db.NVarChar(Max)
+  TemplateName          String    @db.NVarChar(Max)
+  ClientName            String    @db.NVarChar(Max)
+  IsDone                Boolean   @default(false, map: "DF_EslSyncQueue_IsDone")
+  IsProcessing          Boolean   @default(false, map: "DF_EslSyncQueue_IsProcessing")
+  OutputPath            String?   @db.NVarChar(Max)
+  IsPageTwo             Boolean   @default(false, map: "DF_EslSyncQueues_IsPageTwo")
+  IsOnSchedule          Boolean   @default(false, map: "DF_EslSyncQueues_IsOnSchedule")
+  ScheduledNextRunTime  DateTime? @db.DateTime
+  ScheduleLastRun       DateTime? @db.DateTime
+  IsScheduleRepeating   Boolean   @default(false, map: "DF_EslSyncQueues_IsScheduleRepeating")
+  IsPromo               Boolean   @default(false, map: "DF_EslSyncQueues_IsPromo")
+  PromoEnd              DateTime? @db.DateTime
+  PromoStart            DateTime? @db.DateTime
+  PromoPatchedData      String?   @db.NVarChar(Max)
+  PromoOutputPath       String?   @db.NVarChar(Max)
+  IsPeriodicRepeating   Boolean?  @default(false, map: "DF__EslSyncQu__IsPer__4DD47EBD")
+  MinutesBetweenChanges Int?
+  IsOnPromo             Boolean   @default(false, map: "DF__EslSyncQu__IsOnP__4FBCC72F")
+  ZkongProductSku       String?   @db.NVarChar(Max)
+  TicketItSkuTrimmed    String?   @db.NVarChar(256)
+  ClientNameTrimmed     String?   @db.NVarChar(50)
+  LastModified          DateTime  @default(now(), map: "DF__EslSyncQu__LastM__62CF9BA3") @db.DateTime
+  IsDeleted             Boolean   @default(false, map: "DF__EslSyncQu__IsDel__02133CD2")
+  UserId                Int?
+}
+
+model EslToTemplateMappings {
+  Id                   Int            @id(map: "PK_EslToTemplateMappings") @default(autoincrement())
+  DynamicClientId      Int
+  EslTicketName        String         @db.NVarChar(Max)
+  TicketItTemplateName String         @db.NVarChar(Max)
+  SpecificLabelId      String?        @db.NVarChar(Max)
+  DynamicClients       DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_EslToTemplateMappings_DynamicClients")
+}
+
+model EslUpdates {
+  Id              Int            @id(map: "PK_EslUpdates") @default(autoincrement())
+  DynamicClientId Int
+  ProductSKU      String         @db.NVarChar(512)
+  IsProcessing    Boolean        @default(false, map: "DF_EslUpdates_IsProcessing")
+  IsCompleted     Boolean        @default(false, map: "DF_EslUpdates_IsCompleted")
+  DateCreated     DateTime?      @db.DateTime
+  IsPromo         Boolean        @default(false, map: "DF_EslUpdates_IsPromo")
+  PromoStart      DateTime?      @db.DateTime
+  PromoEnd        DateTime?      @db.DateTime
+  UserId          Int?
+  DynamicClients  DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_EslUpdates_DynamicClients")
+}
+
+model EzyVetIntegrations {
+  Id                       Int               @id(map: "PK_dbo.EzyVetIntegrations") @default(autoincrement())
+  DynamicClientId          Int
+  Client                   String            @db.NVarChar(252)
+  Url                      String            @db.NVarChar(252)
+  PartnerId                String            @db.NVarChar(Max)
+  ClientId                 String            @db.NVarChar(Max)
+  ClientSecret             String            @db.NVarChar(Max)
+  GrantType                String            @db.NVarChar(Max)
+  Scope                    String            @db.NVarChar(Max)
+  AccessToken              String?           @db.NVarChar(Max)
+  LastModified             BigInt?
+  TokenExpiry              DateTime?         @db.DateTime
+  IsEzyVetPeriodicEnabled  Boolean?          @default(false, map: "DF__EzyVetInt__IsEzy__58BC2184")
+  EzyVetAPIFields          String?           @db.NVarChar(Max)
+  UserIntegrationId        Int?
+  PriceLastModified        BigInt?
+  PriceLastUpdatedDatetime DateTime?         @db.DateTime
+  DynamicClients           DynamicClients    @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_EzyVetIntegrations_DynamicClients")
+  UserIntegrations         UserIntegrations? @relation(fields: [UserIntegrationId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_EzyVetIntegrations_UserIntegrations")
+}
+
+model FileNote {
+  Id          Int       @id(map: "PK_FileNote") @default(autoincrement())
+  UserId      Int
+  CreatedDate DateTime  @default(now(), map: "DF_FileNote_CreatedDate") @db.DateTime
+  UpdatedDate DateTime? @db.DateTime
+  Notes       String    @db.VarChar(Max)
+  ClientName  String    @db.NVarChar(128)
+  FilePath    String?
+  FileName    String
+  Users       Users     @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_FileNote_Users")
+}
+
+model FtpConfigurationDetails {
+  Id                       Int             @id(map: "PK_FtpConfigurationDetails") @default(autoincrement())
+  DynamicClientId          Int?
+  UserId                   Int?
+  Address                  String          @db.NVarChar(512)
+  Username                 String          @db.NVarChar(512)
+  Password                 String          @db.NVarChar(512)
+  Path                     String          @db.NVarChar(1024)
+  IsDateBasedUpdate        Boolean         @default(false, map: "DF_FtpConfigurationDetails_IsDateBasedUpdate")
+  LastUpdated              DateTime?       @db.DateTime
+  FileExtension            String          @default("N'csv'", map: "DF_FtpConfigurationDetails_FileExtension") @db.NVarChar(256)
+  FileSkuField             String?         @db.NVarChar(512)
+  FileNameField            String?         @db.NVarChar(512)
+  FilePriceField           String?         @db.NVarChar(512)
+  IsEslUpdatesRequired     Boolean         @default(false, map: "DF_FtpConfigurationDetails_IsEslUpdatesRequired")
+  IsSFTP                   Boolean         @default(false, map: "DF_FtpConfigurationDetails_IsSFTP")
+  PriceLastUpdated         DateTime?       @db.DateTime
+  PromotionLastUpdated     DateTime?       @db.DateTime
+  IsPricingUpdateEnabled   Boolean         @default(false, map: "DF__FtpConfig__IsPri__5F891AA4")
+  IsPromotionUpdateEnabled Boolean         @default(false, map: "DF__FtpConfig__IsPro__607D3EDD")
+  DynamicClients           DynamicClients? @relation(fields: [DynamicClientId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_FtpConfigurationDetails_DynamicClients")
+  Users                    Users?          @relation(fields: [UserId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_FtpConfigurationDetails_Users")
+}
+
+model Groups {
+  Id              Int               @id(map: "PK_Groups") @default(autoincrement())
+  Name            String            @db.NVarChar(Max)
+  Client          String            @db.NVarChar(Max)
+  CoreDatasources CoreDatasources[]
+  UserGroup       UserGroup[]
+}
+
+model LCDModels {
+  id         Int     @id(map: "PK__LCDModel__3213E83F11B4EB2A")
+  modelName  String? @db.VarChar(255)
+  resolution String? @db.VarChar(50)
+  width      Int?
+  height     Int?
+}
+
+model OutletPrices {
+  Id        Int      @id(map: "PK_OutletPrices") @default(autoincrement())
+  Client    String   @db.NVarChar(Max)
+  ProductId String   @db.NVarChar(Max)
+  OutletId  Int
+  Price     Decimal? @db.Decimal(18, 2)
+}
+
+model Outlets {
+  Id         Int          @id(map: "PK_Outlets") @default(autoincrement())
+  Name       String       @db.NVarChar(Max)
+  Client     String       @db.NVarChar(Max)
+  OutletId   Int
+  UserOutlet UserOutlet[]
+}
+
+model PluginEditor {
+  Id               Int     @id(map: "PK_ClientTemplateSettings") @default(autoincrement())
+  ClientName       String  @db.NVarChar(256)
+  TemplateSettings String  @db.NVarChar(Max)
+  FontMap          String? @db.NVarChar(Max)
+  XmlUrl           String? @db.NVarChar(Max)
+}
+
+model POSskusToESLMappings {
+  Id             Int       @id(map: "PK_POSskusToESLMappings") @default(autoincrement())
+  ClientName     String    @db.NVarChar(1024)
+  DepartmentName String    @db.NVarChar(1024)
+  UserId         Int?
+  ProductSKU     String    @db.NVarChar(1024)
+  CreatedOn      DateTime? @db.DateTime
+  ModifiedOn     DateTime? @db.DateTime
+  Status         Int?      @default(0, map: "DF__POSskusTo__Statu__7740A8A4")
+  Barcode        String?   @db.NVarChar(256)
+  IsOnPromotion  Boolean   @default(false, map: "DF__POSskusTo__IsOnP__011F1899")
+}
+
+model SavedTemplateStates {
+  Id               Int     @id(map: "PK__SavedTem__3214EC078E0C5038") @default(autoincrement())
+  UserId           Int
+  ProductIdKey     String  @db.VarChar(255)
+  TemplateName     String  @db.VarChar(Max)
+  TemplateQuantity Int
+  ProductIdKeyName String? @db.VarChar(255)
+  Users            Users   @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK__SavedTemp__UserI__2CA8951C")
+}
+
+model ShopifyIntegrations {
+  Id                       Int               @id(map: "PK_dbo.ShopifyIntegrations") @default(autoincrement())
+  DynamicClientId          Int
+  Client                   String            @db.NVarChar(252)
+  StoreName                String            @db.NVarChar(252)
+  ClientId                 String?           @db.NVarChar(Max)
+  ClientSecret             String?           @db.NVarChar(Max)
+  Scope                    String?           @db.NVarChar(Max)
+  AccessToken              String?           @db.NVarChar(Max)
+  LastModified             String?           @db.NVarChar(252)
+  TokenExpiry              DateTime?         @db.DateTime
+  IsShopifyPeriodicEnabled Boolean?          @default(false, map: "DF__ShopifyIn__IsSho__44160A59")
+  ShopifyAPIFields         String?           @db.NVarChar(Max)
+  UserIntegrationId        Int?
+  DynamicClients           DynamicClients    @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_ShopifyIntegrations_DynamicClients")
+  UserIntegrations         UserIntegrations? @relation(fields: [UserIntegrationId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_ShopifyIntegrations_UserIntegrations")
+}
+
+model SolumSettings {
+  Id              Int            @id(map: "PK_SolumSettings") @default(autoincrement())
+  DynamicClientId Int
+  SolumUsername   String         @db.NVarChar(1024)
+  SolumPassword   String         @db.NVarChar(1024)
+  SolumCompany    String         @db.NVarChar(1024)
+  SolumStore      String         @db.NVarChar(1024)
+  ApiKey          String?        @db.NVarChar(Max)
+  DynamicClients  DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_SolumSettings_DynamicClients")
+}
+
+model StockIngestionQueue {
+  Id              Int            @id(map: "PK__StockIng__3214EC07B03255BA") @default(autoincrement())
+  DynamicClientId Int
+  FilePath        String         @db.VarChar(512)
+  Status          String?        @default("Pending", map: "DF__StockInge__Statu__4C764630") @db.VarChar(20)
+  AddedAt         DateTime?      @default(now(), map: "DF__StockInge__Added__4D6A6A69")
+  ProcessedAt     DateTime?
+  ErrorMessage    String?        @db.NVarChar(Max)
+  DynamicClients  DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_StockIngestionQueue_DynamicClient")
+}
+
+model StockMappingProfile {
+  Id              Int            @id(map: "PK__StockMap__3214EC07854592AF") @default(autoincrement())
+  DynamicClientId Int
+  ProfileName     String         @db.VarChar(128)
+  IsActive        Boolean?       @default(false, map: "DF__StockMapp__IsAct__48A5B54C")
+  MappingJson     String         @db.NVarChar(Max)
+  CreatedDate     DateTime?      @default(now(), map: "DF__StockMapp__Creat__4999D985")
+  DynamicClients  DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_StockMappingProfile_DynamicClient")
+}
+
+model StockOnHand_LoadLog {
+  Id                    Int                     @id(map: "PK__StockOnH__3214EC07D90AD361") @default(autoincrement())
+  DynamicClientId       Int
+  FileName              String                  @db.VarChar(256)
+  StartTime             DateTime
+  EndTime               DateTime?
+  Status                String                  @db.VarChar(20)
+  TotalRows             Int?                    @default(0, map: "DF__StockOnHa__Total__5046D714")
+  SuccessRows           Int?                    @default(0, map: "DF__StockOnHa__Succe__513AFB4D")
+  ErrorRows             Int?                    @default(0, map: "DF__StockOnHa__Error__522F1F86")
+  ErrorMessage          String?                 @db.NVarChar(Max)
+  VersionTag            BigInt?
+  DynamicClients        DynamicClients          @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_StockOnHand_LoadLog_DynamicClient")
+  StockOnHand_RowErrors StockOnHand_RowErrors[]
+}
+
+model StockOnHand_RowErrors {
+  Id                  Int                 @id(map: "PK__StockOnH__3214EC0704405E0F") @default(autoincrement())
+  LoadLogId           Int
+  RowNumber           Int
+  RawData             String?             @db.NVarChar(Max)
+  ErrorMessage        String              @db.NVarChar(Max)
+  StockOnHand_LoadLog StockOnHand_LoadLog @relation(fields: [LoadLogId], references: [Id], onUpdate: NoAction, map: "FK__StockOnHa__LoadL__550B8C31")
+}
+
+model StoreGroups {
+  Id                  Int              @id(map: "PK_StoreGroups") @default(autoincrement())
+  Name                String           @db.NVarChar(128)
+  StoreGroupManagerId Int
+  Client              String?          @db.NVarChar(128)
+  Users               Users            @relation(fields: [StoreGroupManagerId], references: [Id], onUpdate: NoAction, map: "FK_StoreGroups_Users")
+  UserStoreGroup      UserStoreGroup[]
+}
+
+model StoreUserLCDDisplayTimeSlots {
+  Id            Int       @id(map: "PK_StoreUserLCDDisplayTimeSlots") @default(autoincrement())
+  StoreUserId   Int
+  Days          String    @db.NVarChar(Max)
+  StartTime     DateTime  @db.DateTime
+  EndTime       DateTime  @db.DateTime
+  MinutesInSlot Int
+  CreatedAt     DateTime  @db.DateTime
+  UpdatedAt     DateTime? @db.DateTime
+  Users         Users     @relation(fields: [StoreUserId], references: [Id], onUpdate: NoAction, map: "FK_StoreUserLCDDisplayTimeSlots_Users")
+}
+
+model StoreUserSolumSettings {
+  Id            Int    @id(map: "PK_StoreUserSolumSettings") @default(autoincrement())
+  SolumStore    String @db.NVarChar(Max)
+  SolumCompany  String @db.NVarChar(Max)
+  SolumUsername String @db.NVarChar(Max)
+  SolumPassword String @db.NVarChar(Max)
+  UserId        Int
+  SolumApiUrl   String @db.NVarChar(Max)
+  Users         Users  @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_StoreUserSolumSettings_Users")
+}
+
+model StoreUserToZkongStores {
+  Id             Int     @id(map: "PK_StoreUserToZkongStores") @default(autoincrement())
+  StoreUserId    Int
+  ZkongStoreId   BigInt
+  IsLinked       Boolean @default(false, map: "DF_StoreUserToZkongStores_IsLinked")
+  ZkongStoreName String? @db.NVarChar(1024)
+  Users          Users   @relation(fields: [StoreUserId], references: [Id], onUpdate: NoAction, map: "FK_StoreUserToZkongStores_Users")
+}
+
+model SwiftPOSIntegrations {
+  Id                        Int               @id(map: "PK_dbo.SwiftPOSIntegrations") @default(autoincrement())
+  DynamicClientId           Int
+  Client                    String            @db.NVarChar(252)
+  Url                       String            @db.NVarChar(252)
+  CustomerId                Int
+  ClientId                  Int
+  ClerkId                   Int
+  Identity                  String            @db.NVarChar(Max)
+  Signature                 String            @db.NVarChar(Max)
+  AccessToken               String?           @db.NVarChar(Max)
+  LastModified              DateTime?         @db.DateTime
+  TokenExpiry               DateTime?         @db.DateTime
+  IsSwiftPOSPeriodicEnabled Boolean?          @default(false, map: "DF__SwiftPOSI__IsSwi__797DF6D1")
+  SwiftPOSAPIFields         String?           @db.NVarChar(Max)
+  UserIntegrationId         Int?
+  DynamicClients            DynamicClients    @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_SwiftPOSIntegrations_DynamicClients")
+  UserIntegrations          UserIntegrations? @relation(fields: [UserIntegrationId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_SwiftPOSIntegrations_UserIntegrations")
+}
+
+model TemplateGroups {
+  Id                     Int                  @id(map: "PK_TemplateGroups") @default(autoincrement())
+  UserId                 Int
+  TemplateGroupName      String               @db.NVarChar(50)
+  Client                 String               @db.NVarChar(50)
+  TemplateGroupStartDate DateTime?            @db.DateTime
+  TemplateGroupEndDate   DateTime?            @db.DateTime
+  TemplateSettings       String               @db.NVarChar(Max)
+  UsersInGroup           String?              @db.NVarChar(Max)
+  TicketGroupNotes       String?              @db.NVarChar(1056)
+  Users                  Users                @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_dbo.TemplateGroups_dbo.Users_UserId")
+  TemplateGroupUsers     TemplateGroupUsers[]
+}
+
+model TemplateGroupUsers {
+  Id              Int            @id(map: "PK_TemplateGroupUsers") @default(autoincrement())
+  UserId          Int
+  TemplateGroupId Int
+  Client          String         @db.NVarChar(50)
+  TemplateGroups  TemplateGroups @relation(fields: [TemplateGroupId], references: [Id], onUpdate: NoAction, map: "FK_dbo.TemplateGroupUsers_dbo.TemplateGroups_TemplateGroupId")
+  Users           Users          @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_dbo.TemplateGroupUsers_dbo.Users_UserId")
+}
+
+model TemplatePreviews {
+  Id              Int     @id(map: "PK_TemplatePreviews") @default(autoincrement())
+  UserId          Int
+  TemplateName    String  @db.NVarChar(124)
+  PreviewFileName String? @db.NVarChar(124)
+  PreviewFilePath String? @db.NVarChar(Max)
+  Client          String  @db.NVarChar(50)
+  PreviewName     String? @db.NVarChar(124)
+  PreviewId       Int?
+}
+
+model TicketIndex {
+  DynamicClientId  BigInt
+  UserId           BigInt
+  BatchId          BigInt
+  BatchType        String    @db.NVarChar(50)
+  TicketId         BigInt
+  Sku              String?   @db.NVarChar(200)
+  Description      String?   @db.NVarChar(400)
+  Price            Decimal?  @db.Decimal(18, 2)
+  TypesSummary     String?   @db.NVarChar(Max)
+  Summary          String?
+  IsPrinting       Boolean   @default(false, map: "DF__TicketInd__IsPri__3D3402A0")
+  BlobPath         String
+  BlobETag         String?   @db.NVarChar(100)
+  BlobLastModified DateTime? @db.DateTimeOffset
+  CreatedUtc       DateTime  @default(dbgenerated("sysutcdatetime()"), map: "DF__TicketInd__Creat__3E2826D9") @db.DateTimeOffset
+  UpdatedUtc       DateTime  @default(dbgenerated("sysutcdatetime()"), map: "DF__TicketInd__Updat__3F1C4B12") @db.DateTimeOffset
+
+  @@id([DynamicClientId, UserId, BatchId, TicketId], map: "PK_TicketIndex")
+  @@index([DynamicClientId, UserId, IsPrinting, UpdatedUtc], map: "IX_TicketIndex_DynClient_User_IsPrinting_Updated")
+  @@index([DynamicClientId, UserId], map: "IX_TicketIndex_DynClient_User_Sku")
+}
+
+model TicketTypeQty {
+  DynamicClientId BigInt
+  UserId          BigInt
+  BatchId         BigInt
+  TicketId        BigInt
+  TicketType      String   @db.NVarChar(100)
+  Quantity        Int
+  UpdatedUtc      DateTime @default(dbgenerated("sysutcdatetime()"), map: "DF__TicketTyp__Updat__42ECDBF6") @db.DateTimeOffset
+
+  @@id([DynamicClientId, UserId, BatchId, TicketId, TicketType], map: "PK_TicketTypeQty")
+}
+
+model UserDepartment {
+  UserId       Int
+  DepartmentId Int
+  Departments  Departments @relation(fields: [DepartmentId], references: [Id], onUpdate: NoAction, map: "FK_dbo.UserDepartment_dbo.Departments_DepartmentId")
+  Users        Users       @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_dbo.UserDepartment_dbo.Users_UserId")
+
+  @@id([UserId, DepartmentId], map: "PK_dbo.UserDepartment")
+}
+
+model UserGroup {
+  UserId  Int
+  GroupId Int
+  Groups  Groups @relation(fields: [GroupId], references: [Id], onUpdate: NoAction, map: "FK_UserGroup_Groups")
+  Users   Users  @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_UserGroup_Users")
+
+  @@id([UserId, GroupId], map: "PK_UserGroup")
+}
+
+model UserIntegrations {
+  Id                           Int                    @id(map: "PK_dbo.UserIntegrations") @default(autoincrement())
+  ClientId                     Int
+  UserId                       Int
+  IsUsingVendApi               Boolean                @default(false, map: "DF_UserIntegrations_IsUsingVendAPI")
+  VendApiKey                   String?                @db.NVarChar(256)
+  VendTokenExpiry              DateTime?              @db.DateTime
+  VendDomainPrefix             String?                @db.NVarChar(256)
+  VendAccessToken              String?                @db.NVarChar(256)
+  VendRefreshToken             String?                @db.NVarChar(256)
+  VendHighestProductVers       BigInt?
+  IsProductSync                Boolean                @default(false, map: "DF_UserIntegrations_IsProductSync")
+  ShopfrontApiKey              String?                @db.NVarChar(256)
+  ShopfrontTokenExpiry         DateTime?              @db.DateTime
+  ShopfrontDomainPrefix        String?                @db.NVarChar(256)
+  ShopfrontAccessToken         String?                @db.NVarChar(Max)
+  ShopfrontRefreshToken        String?                @db.NVarChar(Max)
+  IsUsingShopfrontApi          Boolean                @default(false, map: "DF_UserIntegrations_IsUsingShopfrontApi")
+  ShopfrontRedirectUrl         String?                @db.NVarChar(512)
+  VendRedirectUrl              String?                @db.NVarChar(512)
+  VendClientId                 String?                @db.NVarChar(256)
+  VendClientSecret             String?                @db.NVarChar(256)
+  ShopfrontClientId            String?                @db.NVarChar(256)
+  ShopfrontClientSecret        String?                @db.NVarChar(256)
+  REXUsername                  String?                @db.NVarChar(128)
+  REXPassword                  String?                @db.NVarChar(128)
+  REXClientId                  String?                @db.NVarChar(256)
+  REXDomainPrefix              String?                @db.NVarChar(256)
+  REXLastUpdated               DateTime?              @db.DateTime
+  IsUsingREXApi                Boolean                @default(false, map: "DF_UserIntegrations_IsUsingREXApi")
+  REXChannelId                 Int?
+  REXApiKey                    String?                @db.NVarChar(128)
+  REXTokenExpiry               DateTime?              @db.DateTime
+  REXAccessToken               String?                @db.NVarChar(2048)
+  ApiTimezoneId                String?                @db.NVarChar(256)
+  LastApiCheckDateTime         DateTime?              @db.DateTime
+  IsUsingCountrHQApi           Boolean                @default(false, map: "DF__UserInteg__IsUsi__37C5420D")
+  CountrHQUserName             String?                @db.NVarChar(128)
+  CountrHQPassword             String?                @db.NVarChar(128)
+  CountrHQClientId             String?                @db.NVarChar(256)
+  CountrHQChannelId            Int?
+  CountrHQDomainPrefix         String?                @db.NVarChar(256)
+  CountrHQLastUpdate           DateTime?              @db.DateTime
+  CountrHQApiKey               String?                @db.NVarChar(128)
+  CountrHQTokenExpiry          DateTime?              @db.DateTime
+  CountrHQAccessToken          String?                @db.NVarChar(2048)
+  CountrHQClientSecret         String?                @db.NVarChar(256)
+  CountrHQRefreshToken         String?                @db.NVarChar(256)
+  CountrHQRedirectUrl          String?                @db.NVarChar(512)
+  ShopfrontLastUpdated         DateTime?              @db.DateTime
+  DearAccountId                String?                @db.NVarChar(2048)
+  DearApplicationKey           String?                @db.NVarChar(Max)
+  IsUsingDearApi               Boolean                @default(false, map: "DF__UserInteg__IsUsi__38B96646")
+  ShopfrontState               String?                @db.NVarChar(526)
+  RedirectToShopfrontIntegrate String?                @db.NVarChar(256)
+  DearLastUpdated              DateTime?              @db.DateTime
+  DataFieldsToAPIMappings      String?                @db.NVarChar(Max)
+  REXAPIFields                 String?                @db.NVarChar(Max)
+  VendAPIFields                String?                @db.NVarChar(Max)
+  ShopfrontAPIFields           String?                @db.NVarChar(Max)
+  ClientName                   String                 @db.NVarChar(256)
+  Email                        String                 @db.NVarChar(256)
+  Login                        String                 @db.NVarChar(256)
+  DearAPIFields                String?                @db.NVarChar(Max)
+  CountrAPIFields              String?                @db.NVarChar(Max)
+  VendHighestConsignmentVers   BigInt?
+  REXITOLastUpdated            DateTime?              @db.DateTime
+  IsUsingNetsuiteApi           Boolean                @default(false, map: "DF__UserInteg__IsUsi__18178C8A")
+  NetsuiteAccountId            String?                @db.NVarChar(256)
+  NetsuiteConsumerKey          String?                @db.NVarChar(512)
+  NetsuiteConsumerSecret       String?                @db.NVarChar(512)
+  NetsuiteTokenId              String?                @db.NVarChar(512)
+  NetsuiteTokenSecret          String?                @db.NVarChar(512)
+  NetsuiteApiFields            String?                @db.NVarChar(512)
+  NetsuiteLastUpdated          DateTime?              @db.DateTime
+  EziAPIFields                 String?                @db.NVarChar(Max)
+  EziUserName                  String?                @db.NVarChar(512)
+  EziPassword                  String?                @db.NVarChar(512)
+  IsUsingEziApi                Boolean                @default(false, map: "DF__UserInteg__IsUsi__2B2A60FE")
+  EziLastPrintedDate           DateTime?              @db.DateTime
+  PrintRequestType             Int?                   @default(0, map: "DF__UserInteg__Print__2D12A970")
+  WorldsmartGmAppKey           String?                @db.NVarChar(2048)
+  WorldsmartAuthorizationToken String?                @db.NVarChar(Max)
+  IsUsingWorldsmartApi         Boolean                @default(false, map: "DF__UserInteg__IsUsi__515009E6")
+  WorldsmartAPIFields          String?                @db.NVarChar(Max)
+  WorldsmartAppUsername        String?                @db.NVarChar(256)
+  WorldsmartAppPassword        String?                @db.NVarChar(256)
+  WorldsmartApiUsername        String?                @db.NVarChar(256)
+  WorldsmartApiPassword        String?                @db.NVarChar(256)
+  WorldsmartLastModified       DateTime?              @db.DateTime
+  IsUsingEzyVetApi             Boolean                @default(false, map: "DF__UserInteg__IsUsi__5D80D6A1")
+  IsUsingMagentaApi            Boolean                @default(false, map: "DF__UserInteg__IsUsi__5B638405")
+  MagentaUserName              String?                @db.NVarChar(512)
+  MagentaPassword              String?                @db.NVarChar(512)
+  MagentaLastModified          DateTime?              @db.DateTime
+  IsUsingFTPApi                Boolean?               @default(false, map: "DF_UserIntegrations_IsUsingFTPApi")
+  MagentaLastExtractGuid       String?                @db.NVarChar(512)
+  IsUsingShopifyApi            Boolean?               @default(false, map: "DF__UserInteg__IsUsi__41399DAE")
+  IsUsingSwiftPOSApi           Boolean                @default(false, map: "DF__UserInteg__IsUsi__0C90CB45")
+  EzyVetIntegrations           EzyVetIntegrations[]
+  ShopifyIntegrations          ShopifyIntegrations[]
+  SwiftPOSIntegrations         SwiftPOSIntegrations[]
+  DynamicClients               DynamicClients         @relation(fields: [ClientId], references: [Id], onUpdate: NoAction, map: "FK_dbo.UserIntegrations_dbo.DynamicClients_Id")
+  Users                        Users                  @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_dbo.UserIntegrations_dbo.Users_UserId")
+}
+
+model UserOutlet {
+  UserId   Int
+  OutletId Int
+  Outlets  Outlets @relation(fields: [OutletId], references: [Id], onUpdate: NoAction, map: "FK_UserOutlet_Outlets")
+  Users    Users   @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_UserOutlet_Users")
+
+  @@id([UserId, OutletId], map: "PK_UserOutlet")
+}
+
+model Users {
+  Id                           Int                            @id(map: "PK_dbo.Users") @default(autoincrement())
+  Login                        String                         @db.NVarChar(128)
+  Email                        String                         @db.NVarChar(128)
+  FirstName                    String                         @db.NVarChar(64)
+  LastName                     String                         @db.NVarChar(64)
+  AddressLine1                 String                         @db.NVarChar(128)
+  AddressLine2                 String?                        @db.NVarChar(128)
+  Phone                        String                         @db.NVarChar(64)
+  Client                       String                         @db.NVarChar(Max)
+  RegionName                   String                         @db.NVarChar(64)
+  DoItId                       Int?
+  IsActive                     Boolean                        @default(true, map: "DF__Users__IsActive__76969D2E")
+  StoreCategory                String?                        @default("", map: "DF_dbo.Users_StoreCategory") @db.NVarChar(64)
+  GroupName                    String?                        @db.NVarChar(32)
+  Tags                         String?                        @db.NVarChar(Max)
+  ZoneName                     String?                        @db.NVarChar(Max)
+  IsPasswordChangeRequired     Boolean                        @default(false, map: "DF_Users_IsPasswordChangeRequired")
+  InitialPassword              String?                        @db.NVarChar(Max)
+  IsFormSignup                 Boolean?
+  DateTimeSignup               DateTime?                      @db.DateTime
+  SignupCode                   String?                        @db.NVarChar(Max)
+  SignupPOSSystem              String?                        @db.NVarChar(Max)
+  AuthKey                      String?                        @db.NVarChar(Max)
+  HasDigitalContentEnabled     Boolean                        @default(false, map: "DF__Users__HasDigita__4AD81681")
+  ScreenId                     String?                        @db.NVarChar(Max)
+  IsHeadOfficeAdmin            Boolean                        @default(false, map: "DF__Users__IsHeadOff__5DEAEAF5")
+  IsUserInvoicing              Boolean                        @default(true, map: "DF__Users__IsUserInv__5EDF0F2E")
+  CoreToken                    String?                        @db.NVarChar(512)
+  CategoryId                   String?                        @db.NVarChar(256)
+  CriteriaId                   String?                        @db.NVarChar(256)
+  UserPassword                 String?                        @db.VarChar(255)
+  ResetTokenExpiry             DateTime?                      @db.DateTime
+  PasswordResetToken           String?                        @db.UniqueIdentifier
+  CartItemsOfUser              String?                        @db.NVarChar(Max)
+  OutletId                     Int?
+  SOHKeyFields                 String?                        @db.NVarChar(Max)
+  Batches                      Batches[]
+  CoreDatasources              CoreDatasources[]
+  FileNote                     FileNote[]
+  FtpConfigurationDetails      FtpConfigurationDetails[]
+  SavedTemplateStates          SavedTemplateStates[]
+  StoreGroups                  StoreGroups[]
+  StoreUserLCDDisplayTimeSlots StoreUserLCDDisplayTimeSlots[]
+  StoreUserSolumSettings       StoreUserSolumSettings[]
+  StoreUserToZkongStores       StoreUserToZkongStores[]
+  TemplateGroups               TemplateGroups[]
+  TemplateGroupUsers           TemplateGroupUsers[]
+  UserDepartment               UserDepartment[]
+  UserGroup                    UserGroup[]
+  UserIntegrations             UserIntegrations[]
+  UserOutlet                   UserOutlet[]
+  UserStoreGroup               UserStoreGroup[]
+  webpages_UsersInRoles        webpages_UsersInRoles[]
+
+  @@index([Login], map: "nci_wi_Users_BF775CB4D24D8C3518CED441796A3CCD")
+}
+
+model UserStoreGroup {
+  UserId      Int
+  GroupId     Int
+  StoreGroups StoreGroups @relation(fields: [GroupId], references: [Id], onUpdate: NoAction, map: "FK_UserStoreGroup_StoreGroups")
+  Users       Users       @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "FK_UserStoreGroup_Users")
+
+  @@id([UserId, GroupId], map: "PK_UserStoreGroup")
+}
+
+model VersionBatches {
+  Version_Id Int
+  Batch_Id   Int
+  Batches    Batches  @relation(fields: [Batch_Id], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_dbo.VersionBatches_dbo.Batches_Batch_Id")
+  Versions   Versions @relation(fields: [Version_Id], references: [Id], onDelete: Cascade, onUpdate: NoAction, map: "FK_dbo.VersionBatches_dbo.Versions_Version_Id")
+
+  @@id([Version_Id, Batch_Id], map: "PK_dbo.VersionBatches")
+}
+
+model Versions {
+  Id             Int              @id(map: "PK_dbo.Versions") @default(autoincrement())
+  Data           String           @db.NVarChar(Max)
+  VersionBatches VersionBatches[]
+}
+
+model webpages_Membership {
+  UserId                                  Int       @id(map: "PK__webpages__1788CC4C448C60A4")
+  CreateDate                              DateTime? @db.DateTime
+  ConfirmationToken                       String?   @db.NVarChar(128)
+  IsConfirmed                             Boolean?  @default(false, map: "DF__webpages___IsCon__787EE5A0")
+  LastPasswordFailureDate                 DateTime? @db.DateTime
+  PasswordFailuresSinceLastSuccess        Int       @default(0, map: "DF__webpages___Passw__797309D9")
+  Password                                String    @db.NVarChar(128)
+  PasswordChangedDate                     DateTime? @db.DateTime
+  PasswordSalt                            String    @db.NVarChar(128)
+  PasswordVerificationToken               String?   @db.NVarChar(128)
+  PasswordVerificationTokenExpirationDate DateTime? @db.DateTime
+}
+
+model webpages_OAuthMembership {
+  Provider       String @db.NVarChar(30)
+  ProviderUserId String @db.NVarChar(100)
+  UserId         Int
+
+  @@id([Provider, ProviderUserId], map: "PK__webpages__F53FC0EDE08AF6F0")
+}
+
+model webpages_Roles {
+  RoleId                Int                     @id(map: "PK__webpages__8AFACE1A1430E1DB") @default(autoincrement())
+  RoleName              String                  @unique(map: "UQ__webpages__8A2B616019601183") @db.NVarChar(256)
+  webpages_UsersInRoles webpages_UsersInRoles[]
+}
+
+model webpages_UsersInRoles {
+  UserId         Int
+  RoleId         Int
+  webpages_Roles webpages_Roles @relation(fields: [RoleId], references: [RoleId], onUpdate: NoAction, map: "fk_RoleId")
+  Users          Users          @relation(fields: [UserId], references: [Id], onUpdate: NoAction, map: "fk_UserId")
+
+  @@id([UserId, RoleId], map: "PK__webpages__AF2760AD2469DB39")
+}
+
+model ZkongAPISettings {
+  Id                           Int            @id(map: "PK_ZkongAPISettings") @default(autoincrement())
+  DynamicClientId              Int
+  ZkongAccount                 String         @db.NVarChar(1024)
+  ZkongPassword                String         @db.NVarChar(1024)
+  ZkongStoreId                 BigInt?
+  ZkongMerchantId              BigInt?
+  ZkongAgencyId                BigInt?
+  APMac                        String?        @db.NVarChar(1024)
+  ZkongAuthToken               String?        @db.NVarChar(Max)
+  ZkongTokenExpiry             DateTime?      @db.DateTime
+  UsesCoreDataSource           Boolean        @default(false, map: "DF_ZkongAPISettings_UsesCoreDataSource")
+  UsesDayNightSchedule         Boolean        @default(false, map: "DF_ZkongAPISettings_UsesDayNightSchedule")
+  NightSwitchoverTime          DateTime?      @db.DateTime
+  DaySwitchoverTime            DateTime?      @db.DateTime
+  PromoFieldName               String?        @db.NVarChar(512)
+  PromoFieldValue              String?        @db.NVarChar(512)
+  Timezone                     String?        @db.NVarChar(256)
+  ZkongWebAccount              String?        @db.NVarChar(1024)
+  ZkongWebPassword             String?        @db.NVarChar(1024)
+  IsSchedulePromoEndStartTimes Boolean        @default(false, map: "DF_ZkongAPISettings_IsSchedulePromoEndStartTimes")
+  IsForceSyncPending           Boolean        @default(false, map: "DF__ZkongAPIS__IsFor__61DB776A")
+  UserId                       Int?
+  IsTokenUpdatesDisabled       Boolean        @default(false, map: "DF_ZkongAPISettings_IsTokenUpdatesDisabled")
+  DynamicClients               DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_ZkongAPISettings_DynamicClients")
+}
+
+model ZkongEslDetails {
+  Id                  Int     @id(map: "PK_ZkongEslDetails") @default(autoincrement())
+  Barcode             String  @unique(map: "IX_ZkongEslDetails_Barcode") @db.NVarChar(16)
+  Width               Int
+  Height              Int
+  ColorId             Int
+  Size                String  @db.NVarChar(12)
+  Model               String  @db.NVarChar(32)
+  IsFlipped           Boolean @default(false, map: "DF__ZkongEslD__IsFli__60E75331")
+  SpecialTemplateName String? @db.NVarChar(512)
+}
+
+model ZkongEslLCD {
+  Id              Int             @id(map: "PK__ZkongEsl__3214EC07AC43E1E1") @default(autoincrement())
+  DuId            String          @db.NVarChar(255)
+  Name            String          @db.NVarChar(255)
+  Barcode         String?         @db.NVarChar(255)
+  Comment         String?         @db.NVarChar(Max)
+  MerchantId      BigInt?
+  AgencyId        BigInt?
+  Status          Boolean
+  CreatedBy       String          @db.NVarChar(255)
+  CreatedDate     DateTime        @db.DateTime
+  UpdatedBy       String?         @db.NVarChar(255)
+  UpdatedDate     DateTime?       @db.DateTime
+  Tags            String?         @db.NVarChar(Max)
+  DynamicClientId Int?
+  ModelId         BigInt?
+  StoreId         BigInt?
+  RegionName      String?         @db.NVarChar(50)
+  StoreCategory   String?         @db.NVarChar(50)
+  DynamicClients  DynamicClients? @relation(fields: [DynamicClientId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_ZkongEslLCD_DynamicClients")
+}
+
+model ZkongEslToTemplateMappings {
+  Id                   Int            @id(map: "PK_ZkongEslToTemplateMappings") @default(autoincrement())
+  DynamicClientId      Int
+  Model                String         @db.NVarChar(Max)
+  TicketItTemplateName String         @db.NVarChar(Max)
+  Pixels               String         @db.NVarChar(512)
+  Size                 String         @db.NVarChar(512)
+  ColorId              Int
+  PriceTagBarcode      String?        @db.NVarChar(Max)
+  IsRotated            Boolean        @default(false, map: "DF_ZkongEslToTemplateMappings_IsRotated")
+  DynamicClients       DynamicClients @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_ZkongEslToTemplateMappings_DynamicClients")
+}
+
+model ZkongLCDCampaign {
+  Id                    Int                     @id(map: "PK_ZkongLCDCampaign") @default(autoincrement())
+  DynamicClientId       Int
+  Name                  String                  @db.NVarChar(512)
+  StartDateTime         DateTime                @db.DateTime
+  EndDateTime           DateTime                @db.DateTime
+  ZkongStoreIds         String                  @db.NVarChar(1024)
+  ZkongLCDIds           String                  @db.NVarChar(1024)
+  CurrentJSON           String?                 @db.NVarChar(Max)
+  ZkongId               BigInt?
+  Role                  String?                 @db.NVarChar(100)
+  ScreenGroups          String?                 @db.NVarChar(Max)
+  CommercialRules       String?                 @db.NVarChar(Max)
+  Tags                  String?                 @db.NVarChar(Max)
+  RegionName            String?                 @db.NVarChar(512)
+  StoreCategory         String?                 @db.NVarChar(512)
+  DynamicClients        DynamicClients          @relation(fields: [DynamicClientId], references: [Id], onUpdate: NoAction, map: "FK_ZkongLCDCampaign_DynamicClients")
+  ZkongLCDCampaignItems ZkongLCDCampaignItems[]
+}
+
+model ZkongLCDCampaignItems {
+  Id                 Int               @id(map: "PK_ZkongLCDCampaignItems") @default(autoincrement())
+  CampaignName       String            @db.NVarChar(512)
+  SecondsToDisplay   Int
+  ZkongMediaURL      String            @db.NVarChar(Max)
+  IsProcessing       Boolean           @default(false, map: "DF_ZkongLCDCampaignItems_IsProcessing")
+  IsCompleted        Boolean           @default(false, map: "DF_ZkongLCDCampaignItems_IsCompleted")
+  ZkongLCDId         String            @db.NVarChar(64)
+  ContentWidth       Int
+  ContentHeight      Int
+  StoreId            Int
+  StoreName          String            @db.NVarChar(Max)
+  ContentType        String            @db.NVarChar(512)
+  ZkongLCDCampaignId Int?
+  ZkongLCDCampaign   ZkongLCDCampaign? @relation(fields: [ZkongLCDCampaignId], references: [Id], onDelete: NoAction, onUpdate: NoAction, map: "FK_ZkongLCDCampaignItems_ZkongLCDCampaign")
+}

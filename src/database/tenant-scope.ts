@@ -3,9 +3,23 @@ import type { PrismaClient } from '@prisma/client';
 
 /**
  * PostgreSQL session variable read by every Row-Level Security policy.
- * See src/database/migrations/*_rls for the policy definitions.
+ * See src/database/migrations/20260103000100_row_level_security.
  */
 export const TENANT_SESSION_VAR = 'app.current_account_id';
+
+/**
+ * The unprivileged role the policies are attached to.
+ *
+ * The portal connects as the role that owns its tables, and PostgreSQL exempts
+ * a table's owner from RLS. Assuming this role for the length of the
+ * transaction is what subjects the queries inside a tenant scope to the
+ * policies; `SET LOCAL` reverts it at commit or rollback, so a pooled
+ * connection cannot carry it into the next request.
+ *
+ * The migration explains at length why this rather than FORCE ROW LEVEL
+ * SECURITY — in short, login has to read `users` before it knows the tenant.
+ */
+export const TENANT_APP_ROLE = 'ticketit_app';
 
 /** Public account ids are prefixed, opaque strings — see createId(). */
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -61,7 +75,25 @@ export async function withTenantScope<T>(
   }
 
   return prisma.$transaction(async (tx: TransactionClient): Promise<T> => {
+    // Set the tenant first, while still connected as the owner: a custom GUC is
+    // settable by any role, but doing it in this order means the scope is never
+    // half-applied — the role is only assumed once the tenant is in place.
     await tx.$executeRawUnsafe(`SELECT set_config('${TENANT_SESSION_VAR}', $1, true)`, accountId);
+
+    // SET LOCAL ROLE takes an identifier, which cannot be a bind parameter.
+    // TENANT_APP_ROLE is a module constant, never caller input.
+    try {
+      await tx.$executeRawUnsafe(`SET LOCAL ROLE ${TENANT_APP_ROLE}`);
+    } catch (error) {
+      throw new Error(
+        `Could not assume the ${TENANT_APP_ROLE} role, so Row-Level Security would not ` +
+          'apply and this query is being refused rather than run unprotected. Check that ' +
+          'the 20260103000100_row_level_security migration has been applied and that the ' +
+          'connecting user is a member of the role.',
+        { cause: error },
+      );
+    }
+
     return fn(tx);
   }, options);
 }

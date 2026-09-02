@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { RequestContext } from '../interfaces/request-context.interface';
+import type { AuthenticatedActor, RequestContext } from '../interfaces/request-context.interface';
 
 /**
  * Ambient request state. Nothing outside this module touches the storage
@@ -27,6 +27,25 @@ export function requireRequestContext(): RequestContext {
     throw new Error('No request context is active — did this run outside the request pipeline?');
   }
   return context;
+}
+
+/**
+ * Attaches the authenticated actor to the context the middleware already
+ * opened, once the auth guard has verified the token.
+ *
+ * Mutates in place rather than calling `runWithRequestContext` with a new
+ * object, because `AsyncLocalStorage.run` ends its scope as soon as its
+ * callback returns — a guard that re-ran the context would lose the actor
+ * before the route handler ever executed. `RequestContext` is readonly to stop
+ * casual writes; this is the single sanctioned exception, and it only ever
+ * fills a field that was undefined.
+ */
+export function attachActor(actor: AuthenticatedActor): void {
+  const context = storage.getStore();
+  if (!context) {
+    throw new Error('attachActor called outside a request context');
+  }
+  (context as { -readonly [K in keyof RequestContext]: RequestContext[K] }).actor = actor;
 }
 
 /** The active tenant, or undefined on public/unauthenticated routes. */

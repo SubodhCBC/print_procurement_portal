@@ -34,7 +34,7 @@ export async function configureApp(
 
   app.setGlobalPrefix(config.app.globalPrefix, {
     // Probes stay at /health — see VERSION_NEUTRAL on HealthController.
-    exclude: ['health', 'health/live', 'health/ready'],
+    exclude: ['health', 'health/live', 'health/ready', 'health/dependencies'],
   });
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: config.app.apiVersion });
 
