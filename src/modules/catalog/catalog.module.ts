@@ -4,9 +4,11 @@ import { CategoriesController } from './categories.controller';
 import { CategoriesService } from './categories.service';
 import { DerivativeProcessor } from './derivative.processor';
 import { ImportProcessor } from './import.processor';
+import { InventoryController } from './inventory.controller';
 import { ProductImportService } from './product-import.service';
 import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
+import { StockService } from './stock.service';
 
 /**
  * The product catalog (SOW BE-03).
@@ -26,7 +28,7 @@ import { ProductsService } from './products.service';
  * which is the first thing to consume it.
  */
 @Module({
-  controllers: [CategoriesController, ProductsController],
+  controllers: [CategoriesController, ProductsController, InventoryController],
   providers: [
     CategoriesService,
     ProductsService,
@@ -34,7 +36,8 @@ import { ProductsService } from './products.service';
     AssetDerivativeService,
     ImportProcessor,
     DerivativeProcessor,
+    StockService,
   ],
-  exports: [CategoriesService, ProductsService, AssetDerivativeService],
+  exports: [CategoriesService, ProductsService, AssetDerivativeService, StockService],
 })
 export class CatalogModule {}

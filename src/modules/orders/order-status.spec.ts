@@ -5,8 +5,10 @@ import {
   canTransition,
   CANCELLABLE_STATUSES,
   COMMITTED_STATUSES,
+  IN_FULFILMENT_STATUSES,
   isCommitted,
   isTerminal,
+  OPEN_STATUSES,
   OrderStatus,
   requiresApproval,
   TERMINAL_STATUSES,
@@ -190,5 +192,69 @@ describe('requiresApproval', () => {
 
   it('does not require approval for a free order under a zero threshold', () => {
     expect(requiresApproval(0, 0)).toBe(false);
+  });
+});
+
+/**
+ * The two sets the dashboard's queue counts are built from. A wrong answer here
+ * puts a wrong number on the card an operations team reads first.
+ */
+describe('OPEN_STATUSES', () => {
+  it('holds everything between submission and a terminal state', () => {
+    expect([...OPEN_STATUSES].sort()).toEqual(
+      [
+        OrderStatus.PENDING_APPROVAL,
+        OrderStatus.CHANGES_REQUESTED,
+        OrderStatus.APPROVED,
+        OrderStatus.PROCESSING,
+        OrderStatus.DISPATCHED,
+      ].sort(),
+    );
+  });
+
+  it('excludes every terminal status', () => {
+    for (const status of TERMINAL_STATUSES) {
+      expect(OPEN_STATUSES).not.toContain(status);
+    }
+  });
+
+  it('excludes drafts', () => {
+    // A basket that was never submitted is not work anybody is waiting on.
+    expect(OPEN_STATUSES).not.toContain(OrderStatus.DRAFT);
+  });
+
+  it('accounts for every status exactly once, between it and the excluded set', () => {
+    // The property that makes it safe to derive: a status added to the
+    // lifecycle later lands in exactly one of the two, so the queue count can
+    // never silently drop it.
+    const excluded = [OrderStatus.DRAFT, ...TERMINAL_STATUSES];
+    expect(OPEN_STATUSES.length + excluded.length).toBe(Object.values(OrderStatus).length);
+  });
+});
+
+describe('IN_FULFILMENT_STATUSES', () => {
+  it('is the work between approval and the customer receiving it', () => {
+    expect([...IN_FULFILMENT_STATUSES]).toEqual([
+      OrderStatus.APPROVED,
+      OrderStatus.PROCESSING,
+      OrderStatus.DISPATCHED,
+    ]);
+  });
+
+  it('leaves out delivered orders', () => {
+    // Counting the board's last column would make a queue that is being cleared
+    // look busier the better it is being served.
+    expect(IN_FULFILMENT_STATUSES).not.toContain(OrderStatus.DELIVERED);
+  });
+
+  it('leaves out orders still waiting on an approver', () => {
+    // Nothing has reached the warehouse until somebody has approved it.
+    expect(IN_FULFILMENT_STATUSES).not.toContain(OrderStatus.PENDING_APPROVAL);
+  });
+
+  it('is a subset of the open set', () => {
+    for (const status of IN_FULFILMENT_STATUSES) {
+      expect(OPEN_STATUSES).toContain(status);
+    }
   });
 });

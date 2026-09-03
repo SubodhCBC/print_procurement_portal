@@ -61,7 +61,14 @@ export interface LineProductFacts {
   readonly moq: number;
   readonly orderMultiple: number;
   readonly trackInventory: boolean;
-  readonly stockOnHand: number;
+  /**
+   * What is still buyable: the shelf count minus what other orders already hold.
+   *
+   * Named for what it means rather than for the column it comes from. A field
+   * called `stockOnHand` that the validator treated as available is exactly the
+   * confusion that lets two buyers be promised the same last unit.
+   */
+  readonly availableStock: number;
   /** Null when the line names no variant. */
   readonly variant: { readonly id: string; readonly sku: string; readonly active: boolean } | null;
 }
@@ -159,15 +166,19 @@ export function checkLine(
   //
   // Stock is only counted for products that track it. Print-on-demand has no
   // shelf to run out of, and checking it would block every order.
-  if (product.trackInventory && orderableQuantity > product.stockOnHand) {
+  //
+  // Checked against *available* stock, not the shelf count: units already
+  // promised to other orders are not buyable, and counting them would put a
+  // line in a basket that placement then refuses.
+  if (product.trackInventory && orderableQuantity > product.availableStock) {
     issues.push({
       code: CartIssueCode.INSUFFICIENT_STOCK,
       message:
-        product.stockOnHand === 0
+        product.availableStock === 0
           ? `"${product.name}" is out of stock.`
-          : `Only ${product.stockOnHand} of "${product.name}" are in stock; the line needs ${orderableQuantity}.`,
+          : `Only ${product.availableStock} of "${product.name}" are available; the line needs ${orderableQuantity}.`,
       lineId,
-      details: { available: product.stockOnHand, required: orderableQuantity },
+      details: { available: product.availableStock, required: orderableQuantity },
     });
   }
 

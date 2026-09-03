@@ -9,6 +9,10 @@ export { JwtAuthGuard } from './guards/jwt-auth.guard';
 export { mapLegacyRole, toAccountSlug, LEGACY_ROLE_NAMES } from './role-mapping';
 export type { LegacyRoleName } from './role-mapping';
 export { toLoginResponse, toUserView } from './dto/auth-response';
-export type { AuthenticatedUserView, LoginResponse } from './dto/auth-response';
+export type {
+  AuthenticatedUserRecord,
+  AuthenticatedUserView,
+  LoginResponse,
+} from './dto/auth-response';
 export { LoginSchema, RefreshSchema, LogoutSchema } from './dto/auth.dto';
 export type { LoginDto, RefreshDto, LogoutDto } from './dto/auth.dto';

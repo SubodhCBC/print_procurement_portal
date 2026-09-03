@@ -67,7 +67,9 @@ export class CartController {
       'on the invoice.\n\n' +
       'Adding the same product and option twice merges the quantities — unless either line ' +
       'carries customisation, because two personalised runs of the same SKU are two different ' +
-      'things to print.',
+      'things to print.\n\n' +
+      '`siteId` picks which branch basket to add to, as on every other cart route. A site user ' +
+      'is always pinned to their own.',
   })
   @ApiZodBody(AddCartLineSchema, {
     example: {
@@ -78,9 +80,10 @@ export class CartController {
   })
   async addLine(
     @CurrentUser() actor: AuthenticatedActor,
+    @Query(zodBody(CartQuerySchema)) query: CartQueryDto,
     @Body(zodBody(AddCartLineSchema)) body: AddCartLineDto,
   ): Promise<CartView> {
-    return toCartView(await this.cart.addLine(actor, body));
+    return toCartView(await this.cart.addLine(actor, body, query.siteId));
   }
 
   @Patch('lines/:lineId')

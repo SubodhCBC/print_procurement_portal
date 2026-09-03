@@ -17,7 +17,7 @@ function product(overrides: Partial<LineProductFacts> = {}): LineProductFacts {
     moq: 1,
     orderMultiple: 1,
     trackInventory: false,
-    stockOnHand: 0,
+    availableStock: 0,
     variant: null,
     ...overrides,
   };
@@ -98,20 +98,20 @@ describe('checkLine — MOQ and order multiples', () => {
 describe('checkLine — stock', () => {
   it('ignores stock for print-on-demand', () => {
     // There is no shelf to run out of; checking would block every order.
-    const check = checkLine('crl_1', 10_000, product({ trackInventory: false, stockOnHand: 0 }));
+    const check = checkLine('crl_1', 10_000, product({ trackInventory: false, availableStock: 0 }));
 
     expect(check.issues).toEqual([]);
   });
 
-  it('blocks when the shelf cannot cover the line', () => {
-    const check = checkLine('crl_1', 50, product({ trackInventory: true, stockOnHand: 20 }));
+  it('blocks when what is available cannot cover the line', () => {
+    const check = checkLine('crl_1', 50, product({ trackInventory: true, availableStock: 20 }));
 
     expect(check.issues.map((issue) => issue.code)).toEqual(['INSUFFICIENT_STOCK']);
     expect(check.issues[0]?.details).toMatchObject({ available: 20, required: 50 });
   });
 
   it('says "out of stock" rather than "only 0 available"', () => {
-    const check = checkLine('crl_1', 5, product({ trackInventory: true, stockOnHand: 0 }));
+    const check = checkLine('crl_1', 5, product({ trackInventory: true, availableStock: 0 }));
 
     expect(check.issues[0]?.message).toContain('out of stock');
   });
@@ -119,18 +119,21 @@ describe('checkLine — stock', () => {
   it('checks stock against the rounded quantity, not the typed one', () => {
     // 120 rounds to 500, and 500 is what will draw down the shelf. Checking the
     // 120 would let through an order that cannot be filled.
+    //
+    // "available" here is already net of other orders' reservations — see the
+    // note on LineProductFacts.
     const check = checkLine(
       'crl_1',
       120,
-      product({ moq: 500, orderMultiple: 500, trackInventory: true, stockOnHand: 300 }),
+      product({ moq: 500, orderMultiple: 500, trackInventory: true, availableStock: 300 }),
     );
 
     expect(check.issues.map((issue) => issue.code)).toEqual(['INSUFFICIENT_STOCK']);
     expect(check.issues[0]?.details).toMatchObject({ available: 300, required: 500 });
   });
 
-  it('allows a line that exactly empties the shelf', () => {
-    const check = checkLine('crl_1', 20, product({ trackInventory: true, stockOnHand: 20 }));
+  it('allows a line that takes exactly what is left', () => {
+    const check = checkLine('crl_1', 20, product({ trackInventory: true, availableStock: 20 }));
 
     expect(check.issues).toEqual([]);
   });
@@ -143,7 +146,7 @@ describe('checkLine — every problem at once', () => {
     const check = checkLine(
       'crl_1',
       50,
-      product({ orderable: false, trackInventory: true, stockOnHand: 10 }),
+      product({ orderable: false, trackInventory: true, availableStock: 10 }),
     );
 
     expect(check.issues.map((issue) => issue.code).sort()).toEqual([

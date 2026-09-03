@@ -2,6 +2,8 @@ export { CatalogModule } from './catalog.module';
 export { CategoriesService } from './categories.service';
 export type { CategoryWithCount } from './categories.service';
 export { ProductsService } from './products.service';
+export { StockService } from './stock.service';
+export type { StockReconciliation, StockReconciliationLine } from './products.service';
 export type { FullProduct, PriceableProduct } from './products.service';
 export { ProductImportService, ImportJobPayloadSchema } from './product-import.service';
 export type { ImportRowResult, ImportOutcome, ImportJobPayload } from './product-import.service';

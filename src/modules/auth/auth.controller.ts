@@ -8,7 +8,12 @@ import { Public, type AuthenticatedActor } from '@/common';
 import { loadConfig } from '@/config';
 import { AuthService } from './auth.service';
 import { CurrentUser } from './decorators/current-user.decorator';
-import { toLoginResponse, toUserView, type LoginResponse } from './dto/auth-response';
+import {
+  toLoginResponse,
+  toUserView,
+  type AuthenticatedUserView,
+  type LoginResponse,
+} from './dto/auth-response';
 import {
   LoginSchema,
   LogoutSchema,
@@ -60,7 +65,7 @@ export class AuthController {
     const result = await this.auth.login(body.login, body.password, requestContext(request));
     await this.auth.markLoggedIn(result.user.id);
 
-    return toLoginResponse(result.tokens, result.user);
+    return toLoginResponse(result.tokens, await this.auth.describeUser(result.user));
   }
 
   @Post('refresh')
@@ -74,7 +79,7 @@ export class AuthController {
     @Req() request: FastifyRequest,
   ): Promise<LoginResponse> {
     const result = await this.auth.refresh(body.refreshToken, requestContext(request));
-    return toLoginResponse(result.tokens, result.user);
+    return toLoginResponse(result.tokens, await this.auth.describeUser(result.user));
   }
 
   @Post('logout')
@@ -97,9 +102,9 @@ export class AuthController {
   // and looks like a broken endpoint rather than a missing header.
   @ApiBearerAuth('access-token')
   @ApiOperation({ summary: 'The currently authenticated user' })
-  async me(@CurrentUser() actor: AuthenticatedActor) {
+  async me(@CurrentUser() actor: AuthenticatedActor): Promise<AuthenticatedUserView> {
     const user = await this.auth.findActiveUser(actor.userId);
-    return toUserView(user);
+    return toUserView(await this.auth.describeUser(user));
   }
 }
 

@@ -75,6 +75,11 @@ export const envSchema = z
     // --- Redis / queues ---
     REDIS_URL: z.string().url().startsWith('redis'),
     REDIS_KEY_PREFIX: z.string().default('ticketit'),
+    /**
+     * Report cache lifetime. Zero disables caching altogether — see
+     * CacheService for why a short TTL is preferred to invalidation.
+     */
+    CACHE_TTL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
     QUEUE_PREFIX: z.string().default('ticketit'),
 
     // --- Object storage ---

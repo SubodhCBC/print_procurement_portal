@@ -107,6 +107,35 @@ export const TERMINAL_STATUSES: readonly OrderStatus[] = [
   OrderStatus.CANCELLED,
 ];
 
+/**
+ * Statuses an order is in once it has been submitted and before it is finished.
+ *
+ * Derived from the machine rather than hand-listed, so a status added to the
+ * lifecycle later is counted as open until someone deliberately makes it
+ * terminal. DRAFT is excluded: a basket that was never submitted is not work
+ * anybody is waiting on.
+ *
+ * This is the "how many orders are in flight right now" figure a dashboard
+ * shows, and it is deliberately not windowed by date — an order placed six
+ * weeks ago and still in production is still in flight.
+ */
+export const OPEN_STATUSES: readonly OrderStatus[] = Object.values(OrderStatus).filter(
+  (status) => status !== OrderStatus.DRAFT && !TERMINAL_STATUSES.includes(status),
+);
+
+/**
+ * The working set of the fulfilment board: approved, not yet with the customer.
+ *
+ * DELIVERED is the board's last column but is not in here. It is where work
+ * *ends*, and counting it would make a queue that is being cleared look busier
+ * the better it is being served.
+ */
+export const IN_FULFILMENT_STATUSES: readonly OrderStatus[] = [
+  OrderStatus.APPROVED,
+  OrderStatus.PROCESSING,
+  OrderStatus.DISPATCHED,
+];
+
 export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
   return TRANSITIONS[from].includes(to);
 }

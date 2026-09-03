@@ -5,6 +5,7 @@ import type { AppConfig } from '@/config';
 import { AuthService } from './auth.service';
 import type { LegacyUserRepository, LegacyUserRecord } from './legacy-user.repository';
 import type { PasswordHasherService } from './password/password-hasher.service';
+import type { PermissionService } from '@/modules/authorization';
 import type { TokenService } from './token.service';
 import { hashSimpleMembership } from './password/test-helpers';
 import type { UserProvisioningService } from './user-provisioning.service';
@@ -92,6 +93,7 @@ describe('AuthService — two-database login flow', () => {
     revoke: ReturnType<typeof vi.fn>;
     revokeAllForUser: ReturnType<typeof vi.fn>;
   };
+  let permissions: { resolve: ReturnType<typeof vi.fn> };
   let service: AuthService;
 
   const config = {
@@ -118,6 +120,13 @@ describe('AuthService — two-database login flow', () => {
       revoke: vi.fn(),
       revokeAllForUser: vi.fn(),
     };
+    permissions = {
+      resolve: vi.fn().mockResolvedValue({
+        accountWide: new Set(),
+        has: () => false,
+        hasOn: () => false,
+      }),
+    };
 
     service = new AuthService(
       prisma as never,
@@ -125,6 +134,7 @@ describe('AuthService — two-database login flow', () => {
       hasher as unknown as PasswordHasherService,
       provisioning as unknown as UserProvisioningService,
       tokens as unknown as TokenService,
+      permissions as unknown as PermissionService,
       config,
     );
   });
@@ -241,6 +251,7 @@ describe('AuthService — two-database login flow', () => {
         hasher as unknown as PasswordHasherService,
         provisioning as unknown as UserProvisioningService,
         tokens as unknown as TokenService,
+        permissions as unknown as PermissionService,
         { legacyDatabase: { authFallbackEnabled: false, userSyncTtlSeconds: 86_400 } } as AppConfig,
       );
       prisma.user.findUnique.mockResolvedValue(makeUser());

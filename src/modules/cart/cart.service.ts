@@ -61,10 +61,20 @@ const FULL_CART = Prisma.validator<Prisma.CartInclude>()({
           packSize: true,
           trackInventory: true,
           stockOnHand: true,
+          stockReserved: true,
           leadTimeDays: true,
         },
       },
-      variant: { select: { id: true, sku: true, status: true, deletedAt: true } },
+      variant: {
+        select: {
+          id: true,
+          sku: true,
+          status: true,
+          deletedAt: true,
+          stockOnHand: true,
+          stockReserved: true,
+        },
+      },
     },
     orderBy: { createdAt: 'asc' },
   },
@@ -186,8 +196,16 @@ export class CartService {
    * business card are two different things to print, and adding their
    * quantities together would silently destroy one of them.
    */
-  async addLine(actor: AuthenticatedActor, dto: AddCartLineDto): Promise<FullCart> {
-    const cart = await this.openCart(actor);
+  async addLine(
+    actor: AuthenticatedActor,
+    dto: AddCartLineDto,
+    requestedSiteId?: string,
+  ): Promise<FullCart> {
+    // The branch has to come through here as it does on every other cart
+    // method. Without it a head-office buyer can select a branch basket, see
+    // it, and edit its checkout details — but every line they add lands in
+    // their own branch-less one, which looks like the add silently failing.
+    const cart = await this.openCart(actor, requestedSiteId);
     const product = await this.requireOrderableProduct(actor, dto.productId, dto.variantId ?? null);
 
     await withTenantScope(this.prisma, actor.accountId, async (tx) => {
@@ -731,7 +749,10 @@ export class CartService {
       moq: line.product.moq,
       orderMultiple: line.product.orderMultiple,
       trackInventory: line.product.trackInventory,
-      stockOnHand: line.product.stockOnHand,
+      // A configured line draws on its variant's shelf, not the product's.
+      availableStock: line.variant
+        ? Math.max(0, line.variant.stockOnHand - line.variant.stockReserved)
+        : Math.max(0, line.product.stockOnHand - line.product.stockReserved),
       variant: line.variant
         ? {
             id: line.variant.id,

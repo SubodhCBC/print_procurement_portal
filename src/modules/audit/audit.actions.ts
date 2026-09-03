@@ -51,6 +51,7 @@ export const AuditAction = {
   PRODUCT_ASSET_ATTACHED: 'product.asset_attached',
   PRODUCT_ASSET_REMOVED: 'product.asset_removed',
   PRODUCT_STOCK_ADJUSTED: 'product.stock_adjusted',
+  PRODUCT_STOCK_RECONCILED: 'product.stock_reconciled',
   PRODUCT_IMPORTED: 'product.imported',
 
   // --- Rate cards -----------------------------------------------------------
@@ -71,6 +72,12 @@ export const AuditAction = {
   APPROVAL_RULE_CREATED: 'approval_rule.created',
   APPROVAL_RULE_UPDATED: 'approval_rule.updated',
   APPROVAL_RULE_DELETED: 'approval_rule.deleted',
+
+  // --- Billing --------------------------------------------------------------
+  INVOICE_GENERATED: 'invoice.generated',
+  INVOICE_ISSUED: 'invoice.issued',
+  INVOICE_PAID: 'invoice.paid',
+  INVOICE_VOIDED: 'invoice.voided',
 
   // --- Credentials ----------------------------------------------------------
   PASSWORD_RESET_REQUESTED: 'password.reset_requested',

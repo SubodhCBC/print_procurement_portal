@@ -25,6 +25,12 @@ export interface OrderView {
   readonly placedByEmail: string;
   readonly status: FullOrder['status'];
   readonly paymentStatus: FullOrder['paymentStatus'];
+  /**
+   * Whether this order is holding warehouse stock, has consumed it, or has let
+   * it go. The fulfilment screen needs it: an order showing APPROVED with
+   * nothing reserved is one that will not ship.
+   */
+  readonly stockState: FullOrder['stockState'];
   readonly paymentMethod: FullOrder['paymentMethod'];
   readonly paymentReference: string | null;
   readonly paidAt: string | null;
@@ -115,6 +121,7 @@ export function toOrderView(order: FullOrder | OrderSummary): OrderView {
     placedByEmail: order.placedByEmail,
     status: order.status,
     paymentStatus: order.paymentStatus,
+    stockState: order.stockState,
     paymentMethod: order.paymentMethod,
     paymentReference: order.paymentReference,
     paidAt: order.paidAt?.toISOString() ?? null,

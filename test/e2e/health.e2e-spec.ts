@@ -17,7 +17,11 @@ describe('health (e2e)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
 
-    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    // `bodyParser: false` for the same reason main.ts sets it — configureApp
+    // registers the JSON parser, and Nest's would claim the content type first.
+    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter(), {
+      bodyParser: false,
+    });
     // Same configuration as production, so route prefixes, versioning and
     // security headers are actually the ones being tested.
     await configureApp(app, loadConfig());

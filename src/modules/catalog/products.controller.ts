@@ -72,14 +72,17 @@ export class ProductsController {
     description:
       'Scoped to what the caller may see: an administrator gets the whole catalogue including ' +
       'drafts, everyone else gets published products that are unrestricted or granted to their ' +
-      'account. Asset URLs are omitted here — fetch a product to get presigned links.',
+      'account. Asset URLs are omitted unless `withThumbnails` is set, which presigns one ' +
+      'thumbnail per row; fetch a single product for links to every asset.',
   })
   async list(
     @CurrentUser() actor: AuthenticatedActor,
     @Query(zodBody(ListProductsQuerySchema)) query: ListProductsQueryDto,
   ): Promise<OffsetPage<ProductView>> {
     const page = await this.products.list(actor, query);
-    return { ...page, items: page.items.map((product) => toProductView(product)) };
+    const assetUrls = query.withThumbnails ? await this.products.presignThumbnails(page.items) : {};
+
+    return { ...page, items: page.items.map((product) => toProductView(product, assetUrls)) };
   }
 
   @Get(':productId')

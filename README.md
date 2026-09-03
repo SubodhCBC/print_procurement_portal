@@ -107,10 +107,15 @@ src/
     approvals/             Configurable approval rules and multi-tier routing.
                            Writes order rows directly, so a decision and the
                            status it produces commit together.
+    billing/               Monthly consolidation, gapless invoice numbering,
+                           and the PDF/CSV/XLSX exports.
+    reports/               Analytics. Owns no tables — every figure is computed
+                           from orders and the catalogue.
 
   shared/                  Shared business services
     logger/                Pino module + Sentry
-    cache/                 Redis connection factory
+    cache/                 Redis connection, and a short-lived read-through
+                           cache for reporting aggregates only
     queue/                 BullMQ queues, retry policies
     mailer/                SMTP transport, templates, EMAIL queue consumer
     storage/               S3/MinIO objects and presigned URLs
@@ -140,6 +145,47 @@ paths by `nest build`).
 | `npx tsx scripts/verify-legacy-login.ts <login> <password>`                  | Check one credential against legacy        |
 
 New feature modules use the Nest CLI: `nest g module modules/orders`.
+
+### Development sign-ins
+
+`npm run db:seed` creates one demo tenant (**Apex Healthcare Group**, two
+sites) and a user per portal, all with the password **`Password123!`**:
+
+| Login            | Role          | Site          |
+| ---------------- | ------------- | ------------- |
+| `dev.admin`      | `ADMIN`       | —             |
+| `dev.headoffice` | `HEAD_OFFICE` | account-wide  |
+| `dev.siteuser`   | `SITE_USER`   | `APX-MID-101` |
+
+These are local accounts carrying an Argon2 hash, so they take the returning-user
+path and never touch the legacy database — which is an Azure SQL instance no
+developer machine or CI job can be assumed to reach. The seed refuses to run
+against a production configuration; see `src/database/seeds/dev-users.seed.ts`.
+
+The same command seeds a working catalogue — six categories and eight products
+with option axes, volume ladders and stock levels
+(`src/database/seeds/dev-catalog.seed.ts`). No assets are attached: product
+images live in object storage and are served as presigned links, and a key with
+no object behind it produces tiles that 404 rather than tiles that fall back
+cleanly.
+
+Products that declare option axes also get a variant per combination (33 in
+all). This is not decoration: a configurable product with no variant cannot be
+put in a basket at all, because a line with options and no configuration
+reaches production with nothing saying what to print. Each branch likewise gets
+a bill-to and a ship-to address, without which checkout has nowhere to deliver.
+
+It also seeds contract pricing (`src/database/seeds/dev-pricing.seed.ts`): one
+ACTIVE rate card for the demo account with four negotiated lines covering all
+three item rules — a fixed price, a per-product discount, and a contract volume
+ladder — plus a DRAFT renewal, so the admin screen has both states to render.
+
+Every seed upserts, so re-running them is safe — and re-running restores stock
+levels that ordering has reserved.
+
+To sign in as a real Ticket-IT user instead, use their `Users.Login` value —
+not their email address — and check the credential first with
+`npx tsx scripts/verify-legacy-login.ts <login> <password>`.
 
 ## TypeScript configuration
 

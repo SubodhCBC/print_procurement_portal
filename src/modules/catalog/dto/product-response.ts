@@ -62,6 +62,7 @@ export interface ProductVariantView {
   /** What this variant actually costs — the override, or the product's base. */
   readonly effectivePrice: string;
   readonly stockOnHand: number;
+  readonly availableStock: number;
   readonly status: ProductVariant['status'];
 }
 
@@ -123,7 +124,19 @@ export interface ProductView {
   readonly safeMarginMm: string | null;
   readonly trackInventory: boolean;
   readonly stockOnHand: number;
+  /** Held for placed orders that have not shipped. */
+  readonly stockReserved: number;
+  /**
+   * What anyone can still buy: `stockOnHand - stockReserved`.
+   *
+   * Returned alongside the shelf count rather than instead of it, because the
+   * two answer different questions. A warehouse operator counting the floor
+   * needs the shelf figure; a buyer looking at a tile needs this one.
+   */
+  readonly availableStock: number;
   readonly lowStockThreshold: number;
+  /** How many to buy when it runs low. Null when nobody has set one. */
+  readonly reorderQuantity: number | null;
   /** Derived, so the catalogue grid does not have to compare two fields. */
   readonly isLowStock: boolean;
   readonly leadTimeDays: number | null;
@@ -173,7 +186,13 @@ export function toProductView(
     safeMarginMm: product.safeMarginMm?.toFixed(2) ?? null,
     trackInventory: product.trackInventory,
     stockOnHand: product.stockOnHand,
+    stockReserved: product.stockReserved,
+    availableStock: Math.max(0, product.stockOnHand - product.stockReserved),
     lowStockThreshold: product.lowStockThreshold,
+    reorderQuantity: product.reorderQuantity,
+    // Measured against the shelf, not against what is available: this drives
+    // reordering, and what needs buying is decided by what is physically there
+    // rather than by how much of it is already spoken for.
     isLowStock: product.trackInventory && product.stockOnHand <= product.lowStockThreshold,
     leadTimeDays: product.leadTimeDays,
     tags: product.tags,
@@ -185,6 +204,7 @@ export function toProductView(
       priceOverride: variant.priceOverride?.toFixed(2) ?? null,
       effectivePrice: (variant.priceOverride ?? product.basePrice).toFixed(2),
       stockOnHand: variant.stockOnHand,
+      availableStock: Math.max(0, variant.stockOnHand - variant.stockReserved),
       status: variant.status,
     })),
     // Priced here rather than stored, so the ladder always reflects the current

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ApprovalsModule } from '@/modules/approvals';
+import { CatalogModule } from '@/modules/catalog';
 import { AuthorizationModule } from '@/modules/authorization';
 import { CartModule } from '@/modules/cart';
 import { OrdersController } from './orders.controller';
@@ -22,7 +23,7 @@ import { OrdersService } from './orders.service';
  * which aggregates them by `billingPeriod`.
  */
 @Module({
-  imports: [ApprovalsModule, AuthorizationModule, CartModule],
+  imports: [ApprovalsModule, AuthorizationModule, CartModule, CatalogModule],
   controllers: [OrdersController],
   providers: [OrdersService],
   exports: [OrdersService],

@@ -48,6 +48,11 @@ const productFields = {
   safeMarginMm: Millimetres.nullish(),
   trackInventory: z.boolean().default(true),
   lowStockThreshold: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  /**
+   * How many to buy when stock reaches the threshold. Advisory — it rides along
+   * on the low-stock alert so whoever reorders does not have to look it up.
+   */
+  reorderQuantity: z.coerce.number().int().min(1).max(1_000_000).nullish(),
   leadTimeDays: z.coerce.number().int().min(0).max(365).nullish(),
   tags: z.array(z.string().trim().min(1).max(48)).max(30).default([]),
 };
@@ -88,6 +93,7 @@ export const UpdateProductSchema = z
     safeMarginMm: productFields.safeMarginMm,
     trackInventory: z.boolean().optional(),
     lowStockThreshold: z.coerce.number().int().min(0).max(1_000_000).optional(),
+    reorderQuantity: z.coerce.number().int().min(1).max(1_000_000).nullish(),
     leadTimeDays: productFields.leadTimeDays,
     tags: z.array(z.string().trim().min(1).max(48)).max(30).optional(),
   })
@@ -133,6 +139,19 @@ export const ListProductsQuerySchema = z.object({
     .union([z.boolean(), z.string()])
     .transform((value) => (typeof value === 'boolean' ? value : value === 'true'))
     .optional(),
+  /**
+   * Presign one thumbnail per row.
+   *
+   * Off by default, because the reason list responses carry no asset links is
+   * that most callers — the pricing quote, the importer, a stock report — never
+   * open an image, and signing every asset of every row is work for nobody. A
+   * catalogue grid does need them, so it asks: one signature per product at
+   * most, bounded by `pageSize`.
+   */
+  withThumbnails: z
+    .union([z.boolean(), z.string()])
+    .transform((value) => (typeof value === 'boolean' ? value : value === 'true'))
+    .default(false),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
 });
@@ -336,3 +355,34 @@ export const ListImportJobsQuerySchema = z.object({
 });
 
 export type ListImportJobsQueryDto = z.infer<typeof ListImportJobsQuerySchema>;
+
+/**
+ * A physical stocktake (SOW BE-12).
+ *
+ * Absolute counts, not deltas — the opposite of `AdjustStockSchema`, and
+ * deliberately so. An adjustment says "three arrived"; a stocktake says "there
+ * are forty on the shelf", and asking an operator holding a count sheet to
+ * work out the difference is how a stocktake introduces the error it exists to
+ * remove.
+ *
+ * Synchronous rather than queued, unlike the catalogue import: whoever is
+ * standing in the warehouse needs the variance report now, and a stocktake is
+ * hundreds of lines rather than thousands.
+ */
+export const ReconcileStockSchema = z.object({
+  counts: z
+    .array(
+      z.object({
+        sku: Sku,
+        countedQuantity: z.coerce.number().int().min(0).max(10_000_000),
+        note: z.string().trim().max(500).optional(),
+      }),
+    )
+    .min(1, 'Nothing to reconcile')
+    .max(1_000, 'Reconcile at most 1,000 lines at a time'),
+  /** Report the variances without writing them. */
+  dryRun: z.boolean().default(false),
+  reason: z.string().trim().min(1, 'Say what this stocktake was').max(500),
+});
+
+export type ReconcileStockDto = z.infer<typeof ReconcileStockSchema>;

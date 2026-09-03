@@ -3,6 +3,8 @@ import type { User } from '@prisma/client';
 import { AppError, ErrorCode, ForbiddenError, UnauthenticatedError } from '@/common';
 import { APP_CONFIG, type AppConfig } from '@/config';
 import { PrismaService } from '@/database';
+import { PermissionService } from '@/modules/authorization';
+import type { AuthenticatedUserRecord } from './dto/auth-response';
 import { LegacyUserRepository, type LegacyUserRecord } from './legacy-user.repository';
 import { verifyLegacyPassword } from './password/legacy-password.verifier';
 import { PasswordHasherService } from './password/password-hasher.service';
@@ -50,6 +52,7 @@ export class AuthService {
     private readonly hasher: PasswordHasherService,
     private readonly provisioning: UserProvisioningService,
     private readonly tokens: TokenService,
+    private readonly permissions: PermissionService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -269,6 +272,50 @@ export class AuthService {
       throw new UnauthenticatedError('Account is no longer active');
     }
     return user;
+  }
+
+  /**
+   * The user plus the account, site and effective permissions every session
+   * response carries.
+   *
+   * Kept in the service rather than in the controller because login, refresh
+   * and /auth/me must all describe a session the same way — a client that got
+   * permissions from one of the three and not the others would silently lose
+   * them the moment its access token rotated.
+   */
+  async describeUser(user: User): Promise<AuthenticatedUserRecord> {
+    const [account, site, effective] = await Promise.all([
+      this.prisma.account.findUniqueOrThrow({
+        where: { id: user.accountId },
+        select: { id: true, name: true, accountCode: true, poPrefix: true, requirePoNumber: true },
+      }),
+      user.siteId
+        ? this.prisma.site.findUnique({
+            where: { id: user.siteId },
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              poPrefix: true,
+              poRequired: true,
+              monthlyBudget: true,
+            },
+          })
+        : Promise.resolve(null),
+      this.permissions.resolve({
+        userId: user.id,
+        accountId: user.accountId,
+        role: user.role,
+        userType: user.userType,
+      }),
+    ]);
+
+    return {
+      user,
+      account,
+      site,
+      permissions: [...effective.accountWide].sort(),
+    };
   }
 
   /** Records the successful login. Never allowed to fail the request. */

@@ -20,6 +20,7 @@ import { AssetDerivativeService } from './asset-derivative.service';
 import type {
   AdjustStockDto,
   AttachAssetDto,
+  ReconcileStockDto,
   ChangeProductStatusDto,
   CreateProductDto,
   CreateVariantDto,
@@ -77,6 +78,33 @@ const PRICEABLE_PRODUCT = Prisma.validator<Prisma.ProductSelect>()({
 });
 
 export type PriceableProduct = Prisma.ProductGetPayload<{ select: typeof PRICEABLE_PRODUCT }>;
+
+/** One line of a stocktake, whether it changed anything or not. */
+export interface StockReconciliationLine {
+  readonly sku: string;
+  readonly name?: string;
+  readonly systemQuantity?: number;
+  readonly countedQuantity?: number;
+  /** Counted minus system. Negative means the shelf is short. */
+  readonly variance?: number;
+  readonly reserved?: number;
+  readonly outcome:
+    'MATCHED' | 'ADJUSTED' | 'WOULD_ADJUST' | 'BELOW_RESERVED' | 'NOT_TRACKED' | 'UNKNOWN_SKU';
+  readonly message?: string;
+}
+
+export interface StockReconciliation {
+  readonly dryRun: boolean;
+  readonly reason: string;
+  readonly summary: {
+    readonly counted: number;
+    readonly matched: number;
+    readonly adjusted: number;
+    readonly refused: number;
+    readonly netVariance: number;
+  };
+  readonly lines: readonly StockReconciliationLine[];
+}
 
 /**
  * The product catalog.
@@ -262,6 +290,7 @@ export class ProductsService {
         safeMarginMm: dto.safeMarginMm ?? null,
         trackInventory: dto.trackInventory,
         lowStockThreshold: dto.lowStockThreshold,
+        reorderQuantity: dto.reorderQuantity ?? null,
         leadTimeDays: dto.leadTimeDays ?? null,
         tags: dto.tags,
       },
@@ -310,6 +339,7 @@ export class ProductsService {
         ...(dto.lowStockThreshold !== undefined
           ? { lowStockThreshold: dto.lowStockThreshold }
           : {}),
+        ...(dto.reorderQuantity !== undefined ? { reorderQuantity: dto.reorderQuantity } : {}),
         ...(dto.leadTimeDays !== undefined ? { leadTimeDays: dto.leadTimeDays } : {}),
         ...(dto.tags !== undefined ? { tags: dto.tags } : {}),
       },
@@ -806,6 +836,149 @@ export class ProductsService {
   }
 
   /**
+   * Applies a physical stocktake (SOW BE-12).
+   *
+   * Counts are absolute, and every line that differs from the system is a
+   * variance the operator has to see. Reported whether or not it is written:
+   * the point of a stocktake is the discrepancy, not the new number.
+   *
+   * ---------------------------------------------------------------------------
+   * A count below what is already promised is refused, not applied
+   * ---------------------------------------------------------------------------
+   * If forty are reserved for placed orders and the shelf holds thirty, writing
+   * thirty would make `stockReserved > stockOnHand` — the invariant the whole
+   * reservation scheme rests on. The database refuses it, and so does this,
+   * with a variance the operator has to resolve by cancelling orders or finding
+   * the missing units. Silently clamping would hide a real shortfall until
+   * somebody tried to ship it.
+   */
+  async reconcileStock(
+    dto: ReconcileStockDto,
+    actor: AuthenticatedActor,
+  ): Promise<StockReconciliation> {
+    const skus = dto.counts.map((row) => row.sku);
+    const products = await this.prisma.product.findMany({
+      where: { sku: { in: skus }, deletedAt: null },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        trackInventory: true,
+        stockOnHand: true,
+        stockReserved: true,
+      },
+    });
+
+    const bySku = new Map(products.map((product) => [product.sku, product]));
+    const lines: StockReconciliationLine[] = [];
+
+    for (const row of dto.counts) {
+      const product = bySku.get(row.sku);
+
+      if (!product) {
+        lines.push({ sku: row.sku, outcome: 'UNKNOWN_SKU', message: 'No such product.' });
+        continue;
+      }
+
+      if (!product.trackInventory) {
+        lines.push({
+          sku: row.sku,
+          name: product.name,
+          outcome: 'NOT_TRACKED',
+          message: 'This product does not track inventory.',
+        });
+        continue;
+      }
+
+      const variance = row.countedQuantity - product.stockOnHand;
+
+      if (row.countedQuantity < product.stockReserved) {
+        lines.push({
+          sku: row.sku,
+          name: product.name,
+          systemQuantity: product.stockOnHand,
+          countedQuantity: row.countedQuantity,
+          variance,
+          reserved: product.stockReserved,
+          outcome: 'BELOW_RESERVED',
+          message:
+            `${product.stockReserved} are already promised to placed orders. Cancel those ` +
+            'orders or recount before writing a lower figure.',
+        });
+        continue;
+      }
+
+      if (variance === 0) {
+        lines.push({
+          sku: row.sku,
+          name: product.name,
+          systemQuantity: product.stockOnHand,
+          countedQuantity: row.countedQuantity,
+          variance: 0,
+          reserved: product.stockReserved,
+          outcome: 'MATCHED',
+        });
+        continue;
+      }
+
+      if (!dto.dryRun) {
+        await this.prisma.product.update({
+          where: { id: product.id },
+          data: { stockOnHand: row.countedQuantity },
+        });
+
+        await this.audit.record({
+          action: AuditAction.PRODUCT_STOCK_RECONCILED,
+          entityType: 'PRODUCT',
+          entityId: product.id,
+          entityName: `${product.sku} — ${product.name}`,
+          accountId: actor.accountId,
+          details: {
+            systemQuantity: product.stockOnHand,
+            countedQuantity: row.countedQuantity,
+            variance,
+            reason: dto.reason,
+            note: row.note ?? null,
+          },
+        });
+      }
+
+      lines.push({
+        sku: row.sku,
+        name: product.name,
+        systemQuantity: product.stockOnHand,
+        countedQuantity: row.countedQuantity,
+        variance,
+        reserved: product.stockReserved,
+        outcome: dto.dryRun ? 'WOULD_ADJUST' : 'ADJUSTED',
+      });
+    }
+
+    const summary = {
+      counted: lines.length,
+      matched: lines.filter((line) => line.outcome === 'MATCHED').length,
+      adjusted: lines.filter(
+        (line) => line.outcome === 'ADJUSTED' || line.outcome === 'WOULD_ADJUST',
+      ).length,
+      refused: lines.filter(
+        (line) =>
+          line.outcome === 'BELOW_RESERVED' ||
+          line.outcome === 'UNKNOWN_SKU' ||
+          line.outcome === 'NOT_TRACKED',
+      ).length,
+      // The net movement, which is the number a finance team asks for.
+      netVariance: lines.reduce((total, line) => total + (line.variance ?? 0), 0),
+    };
+
+    this.logger.log(
+      `Stocktake by ${actor.userId}: ${summary.counted} counted, ${summary.adjusted} ` +
+        `${dto.dryRun ? 'would change' : 'changed'}, ${summary.refused} refused.`,
+    );
+
+    return { dryRun: dto.dryRun, reason: dto.reason, summary, lines };
+  }
+
+  /**
    * Tells the people who can do something about it (SOW BE-08).
    *
    * Sent to the platform operator's administrators, not to the customer:
@@ -999,6 +1172,32 @@ export class ProductsService {
    * All signed in parallel: signing is local HMAC work, not a network call, so
    * a product with a dozen images costs microseconds rather than round trips.
    */
+  /**
+   * One thumbnail per product, for a catalogue grid.
+   *
+   * The primary image only — a product may carry artwork, spec sheets and a
+   * dozen photographs, and a grid shows one tile. That keeps the signing cost
+   * at most one call per row rather than one per asset, which is the whole
+   * reason `list` does not simply call `presignAssets` for every product.
+   *
+   * Falls back to the original when no derivative exists yet: a freshly
+   * uploaded image whose resize is still queued should show the full-size file
+   * rather than a broken tile.
+   */
+  async presignThumbnails(products: readonly FullProduct[]): Promise<Record<string, string>> {
+    const jobs = products.flatMap((product) => {
+      const primary = product.assets.find((asset) => asset.kind === 'IMAGE');
+      if (!primary) return [];
+
+      const key = primary.thumbnailKey ?? primary.storageKey;
+      return [
+        this.storage.presignDownload(key).then((url) => [`${primary.id}:thumbnail`, url] as const),
+      ];
+    });
+
+    return Object.fromEntries(await Promise.all(jobs));
+  }
+
   async presignAssets(product: FullProduct): Promise<Record<string, string>> {
     const jobs = product.assets.flatMap((asset) => {
       const entries: Promise<readonly [string, string]>[] = [

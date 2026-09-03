@@ -6,11 +6,8 @@ import { ConfigValidationError, loadConfig } from '@/config';
 import { createRequestId } from '@/common';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
-import { configureApp } from './bootstrap';
+import { BODY_LIMIT_BYTES, configureApp } from './bootstrap';
 import { initSentry } from '@/shared/logger';
-
-/** 8 MB — artwork uploads go straight to object storage via presigned URLs. */
-const BODY_LIMIT_BYTES = 8 * 1024 * 1024;
 
 async function bootstrap(): Promise<void> {
   const config = loadConfig();
@@ -28,6 +25,9 @@ async function bootstrap(): Promise<void> {
 
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, {
     bufferLogs: true, // hold startup logs until pino is wired up
+    // configureApp registers a JSON parser that tolerates an empty body; Nest's
+    // would claim the same content type first and refuse to yield it.
+    bodyParser: false,
   });
 
   app.useLogger(app.get(Logger));

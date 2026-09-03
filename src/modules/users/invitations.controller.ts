@@ -13,7 +13,7 @@ import {
 import { zodBody } from '@/common/pipes/zod-validation.pipe';
 import { ApiZodBody } from '@/common/utils/swagger-zod';
 import { loadConfig } from '@/config';
-import { CurrentUser, toLoginResponse, type LoginResponse } from '@/modules/auth';
+import { AuthService, CurrentUser, toLoginResponse, type LoginResponse } from '@/modules/auth';
 import {
   AcceptInvitationSchema,
   CreateInvitationSchema,
@@ -38,7 +38,10 @@ const AUTH_THROTTLE = {
 @ApiTags('invitations')
 @Controller('invitations')
 export class InvitationsController {
-  constructor(private readonly invitations: InvitationService) {}
+  constructor(
+    private readonly invitations: InvitationService,
+    private readonly auth: AuthService,
+  ) {}
 
   @Post()
   @ApiBearerAuth('access-token')
@@ -111,7 +114,7 @@ export class InvitationsController {
     @Body(zodBody(AcceptInvitationSchema)) body: AcceptInvitationDto,
   ): Promise<LoginResponse> {
     const result = await this.invitations.accept(body.token, body.password);
-    return toLoginResponse(result.tokens, result.user);
+    return toLoginResponse(result.tokens, await this.auth.describeUser(result.user));
   }
 }
 

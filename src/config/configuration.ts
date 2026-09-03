@@ -40,6 +40,14 @@ export interface AppConfig {
     readonly keyPrefix: string;
     readonly queuePrefix: string;
   };
+  readonly cache: {
+    /**
+     * How long a cached report stays valid. Zero switches the cache off
+     * entirely, which is what the tests run with — see CacheService for why
+     * there is a TTL and no invalidation.
+     */
+    readonly ttlSeconds: number;
+  };
   readonly storage: {
     readonly endpoint: string;
     readonly region: string;
@@ -154,6 +162,9 @@ function toAppConfig(env: RawEnv): AppConfig {
       url: env.REDIS_URL,
       keyPrefix: env.REDIS_KEY_PREFIX,
       queuePrefix: env.QUEUE_PREFIX,
+    },
+    cache: {
+      ttlSeconds: env.CACHE_TTL_SECONDS,
     },
     storage: {
       endpoint: env.S3_ENDPOINT,

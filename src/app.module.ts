@@ -5,6 +5,7 @@ import { AppConfigModule, loadConfig } from '@/config';
 import { DatabaseModule } from '@/database';
 import { AppLoggerModule } from '@/shared/logger';
 import { MailerModule } from '@/shared/mailer';
+import { CacheModule } from '@/shared/cache';
 import { ALL_QUEUE_NAMES, QueueModule } from '@/shared/queue';
 import { StorageModule } from '@/shared/storage';
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
@@ -20,6 +21,8 @@ import { PricingModule } from './modules/pricing';
 import { CartModule } from './modules/cart';
 import { OrdersModule } from './modules/orders';
 import { ApprovalsModule } from './modules/approvals';
+import { BillingModule } from './modules/billing';
+import { ReportsModule } from './modules/reports';
 import { SitesModule } from './modules/sites';
 import { UsersModule } from './modules/users';
 
@@ -39,6 +42,7 @@ const config = loadConfig();
     AppConfigModule,
     AppLoggerModule.forRoot({ httpLogging: true }),
     DatabaseModule,
+    CacheModule,
     QueueModule.forRoot(ALL_QUEUE_NAMES),
     // After QueueModule: MailerModule's dispatcher injects the `email` queue
     // that QueueModule registers, and its processor consumes it.
@@ -79,6 +83,10 @@ const config = loadConfig();
     // Before OrdersModule: placing an order raises an approval through it.
     ApprovalsModule,
     OrdersModule,
+    // After OrdersModule: an invoice is a month of its orders.
+    BillingModule,
+    // Last: reports read what every module above writes, and own nothing.
+    ReportsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

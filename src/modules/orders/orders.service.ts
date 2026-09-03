@@ -16,6 +16,7 @@ import { PrismaService, withTenantScope } from '@/database';
 import { AuditAction, AuditService } from '@/modules/audit';
 import { PermissionService } from '@/modules/authorization';
 import { ApprovalsService } from '@/modules/approvals';
+import { StockService } from '@/modules/catalog';
 import { CartService, type CartValidation } from '@/modules/cart';
 import { MailDispatcher, type OrderSummaryInput } from '@/shared/mailer';
 import type {
@@ -82,6 +83,7 @@ export class OrdersService {
     private readonly cart: CartService,
     private readonly approvals: ApprovalsService,
     private readonly mail: MailDispatcher,
+    private readonly stock: StockService,
   ) {}
 
   // --- Placing ----------------------------------------------------------------
@@ -211,6 +213,32 @@ export class OrdersService {
           };
         }),
       });
+
+      // Reserved inside the placement transaction, before anything else can
+      // read the order. A reservation left behind by an order that failed to
+      // save is inventory nobody can buy and nobody knows to release; a
+      // reservation taken after the commit is a window in which two buyers can
+      // both be promised the last unit.
+      //
+      // Reserved even while the order is only PENDING_APPROVAL. The alternative
+      // — waiting for approval — means an order can clear its approvers and
+      // then turn out to be unfillable, which is the worst moment to find out.
+      const reserved = await this.stock.reserve(
+        tx,
+        session.lines.map((line) => ({
+          productId: line.line.productId,
+          variantId: line.line.variantId,
+          quantity: line.check.orderableQuantity,
+          sku: line.line.product.sku,
+        })),
+      );
+
+      if (reserved) {
+        await tx.order.update({
+          where: { id: orderId },
+          data: { stockState: 'RESERVED' },
+        });
+      }
 
       // Configurable rules first (BE-07). They supersede the account
       // threshold entirely: once an account has any, the simple number is
@@ -421,6 +449,19 @@ export class OrdersService {
           ...(to === OrderStatus.CANCELLED ? { cancelledAt: now } : {}),
         },
       });
+
+      // The shelf moves in the same transaction as the status. A dispatched
+      // order whose stock was not consumed would be counted twice for as long
+      // as it took anyone to notice.
+      if (before.stockState === 'RESERVED') {
+        if (to === OrderStatus.DISPATCHED) {
+          await this.stock.consume(tx, stockLines(before));
+          await tx.order.update({ where: { id: orderId }, data: { stockState: 'CONSUMED' } });
+        } else if (to === OrderStatus.REJECTED || to === OrderStatus.CANCELLED) {
+          await this.stock.release(tx, stockLines(before));
+          await tx.order.update({ where: { id: orderId }, data: { stockState: 'RELEASED' } });
+        }
+      }
 
       await tx.orderStatusEvent.create({
         data: {
@@ -691,6 +732,16 @@ function addressSnapshot(
     country: address.country,
     phone: address.phone,
   };
+}
+
+/** An order's lines in the shape StockService works in. */
+function stockLines(order: FullOrder) {
+  return order.lines.map((line) => ({
+    productId: line.productId,
+    variantId: line.variantId,
+    quantity: line.quantity,
+    sku: line.sku,
+  }));
 }
 
 /** The order facts every notification repeats back to its reader. */

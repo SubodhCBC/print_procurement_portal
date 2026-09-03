@@ -6,8 +6,25 @@ import {
   type AuthenticatedActor,
   type Permission,
   type RequestContext,
+  type Role,
+  type UserType,
 } from '@/common';
 import { PrismaService } from '@/database';
+
+/**
+ * The parts of an actor that decide their permissions.
+ *
+ * Narrower than AuthenticatedActor on purpose: the login and refresh responses
+ * have to report a user's permissions before any access token exists, so there
+ * is no session id or bearer identity to hand over yet. Everything the
+ * resolution below actually reads is here.
+ */
+export interface PermissionSubject {
+  readonly userId: string;
+  readonly accountId: string;
+  readonly role: Role;
+  readonly userType: UserType;
+}
 
 /**
  * What a user may actually do, once their per-user grants have been applied on
@@ -52,7 +69,7 @@ export class PermissionService {
    * index; if it ever stops being cheap, the natural next step is a short-lived
    * Redis entry keyed by user id and invalidated on grant writes.
    */
-  async resolve(actor: AuthenticatedActor): Promise<EffectivePermissions> {
+  async resolve(actor: PermissionSubject): Promise<EffectivePermissions> {
     const context = getRequestContext();
     if (!context) return this.load(actor);
 
@@ -64,7 +81,7 @@ export class PermissionService {
     return pending;
   }
 
-  private async load(actor: AuthenticatedActor): Promise<EffectivePermissions> {
+  private async load(actor: PermissionSubject): Promise<EffectivePermissions> {
     const base = new Set(basePermissionsFor(actor.role, actor.userType));
 
     const rows = await this.prisma.userPermissionGrant.findMany({
