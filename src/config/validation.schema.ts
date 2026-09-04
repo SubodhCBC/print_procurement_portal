@@ -26,6 +26,21 @@ const duration = z.string().regex(/^\d+(ms|s|m|h|d)$/, 'must look like 15m, 900s
 export const APP_ENVS = ['development', 'staging', 'production'] as const;
 export type AppEnv = (typeof APP_ENVS)[number];
 
+/**
+ * An optional value that is allowed to be present-but-blank.
+ *
+ * `.env.example` lists a key with no value so an operator can see it exists and
+ * fill it in later. Copied into a real `.env`, that reaches zod as `""` — which
+ * fails a `.url()` or `.min(1)` check on a variable that was deliberately left
+ * unset, and turns "I have not configured the DAM yet" into a boot failure.
+ * Blank is normalised to absent before the format check runs.
+ */
+const blankAsUnset = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    schema.optional(),
+  );
+
 const SECRET_MIN_LENGTH = 32;
 const secret = z
   .string()
@@ -91,6 +106,30 @@ export const envSchema = z
     S3_FORCE_PATH_STYLE: booleanish.default(true),
     S3_PUBLIC_BASE_URL: z.string().url(),
     S3_PRESIGN_EXPIRY_SECONDS: positiveInt.default(900),
+
+    // --- Document library (DAM) ---
+    /**
+     * Off until the DAM's endpoint and credentials exist.
+     *
+     * The switch is separate from "are the credentials set" on purpose: a
+     * half-configured DAM should refuse loudly rather than half-work, and an
+     * operator who wants it off for an afternoon should not have to delete a
+     * secret to do it. DamIntegrationService checks both.
+     */
+    DAM_ENABLED: booleanish.default(false),
+    /** Base URL of the DAM API, without a trailing slash. */
+    DAM_BASE_URL: blankAsUnset(z.string().url()),
+    /** Bearer token. Optional only because the DAM is not live yet. */
+    DAM_API_KEY: blankAsUnset(z.string().min(1)),
+    /**
+     * How long a DAM call may take before it is abandoned. A library that has
+     * stopped answering must not hold a request open until the browser gives
+     * up: a gallery that fails in two seconds is recoverable, one that hangs
+     * for a minute is not.
+     */
+    DAM_TIMEOUT_MS: positiveInt.default(8_000),
+    /** Folder new uploads land in, when the caller names none. */
+    DAM_DEFAULT_FOLDER: blankAsUnset(z.string().min(1)),
 
     // --- Auth ---
     JWT_ACCESS_SECRET: secret,

@@ -13,6 +13,7 @@ export const AuditAction = {
   ACCOUNT_UPDATED: 'account.updated',
   ACCOUNT_STATUS_CHANGED: 'account.status_changed',
   ACCOUNT_DEACTIVATED: 'account.deactivated',
+  ACCOUNT_SETTINGS_UPDATED: 'account.settings_updated',
 
   // --- Sites ----------------------------------------------------------------
   SITE_CREATED: 'site.created',
@@ -82,6 +83,30 @@ export const AuditAction = {
   // --- Credentials ----------------------------------------------------------
   PASSWORD_RESET_REQUESTED: 'password.reset_requested',
   PASSWORD_RESET_COMPLETED: 'password.reset_completed',
+  /// Changed deliberately by a signed-in user, as opposed to recovered by a
+  /// reset token. Worth telling apart in the trail: one is routine hygiene,
+  /// the other is the tail end of "I lost my password".
+  PASSWORD_CHANGED: 'password.changed',
+  // --- Templates ------------------------------------------------------------
+  TEMPLATE_CREATED: 'template.created',
+  TEMPLATE_UPDATED: 'template.updated',
+  TEMPLATE_STATUS_CHANGED: 'template.status_changed',
+  TEMPLATE_PUBLISHED: 'template.published',
+  TEMPLATE_VERSION_RESTORED: 'template.version_restored',
+  TEMPLATE_DUPLICATED: 'template.duplicated',
+  TEMPLATE_DELETED: 'template.deleted',
+  TEMPLATE_VISIBILITY_SET: 'template.visibility_set',
+  TEMPLATE_ASSET_ATTACHED: 'template.asset_attached',
+  TEMPLATE_ASSET_REMOVED: 'template.asset_removed',
+
+  // --- Document library (DAM) -----------------------------------------------
+  /// Reads are logged as well as writes. A DAM holds documents whose *reading*
+  /// is the sensitive act, and "who took the artwork" is unanswerable after the
+  /// fact if only uploads were recorded.
+  DAM_DOCUMENTS_LISTED: 'dam.documents_listed',
+  DAM_DOCUMENT_VIEWED: 'dam.document_viewed',
+  DAM_DOCUMENT_DOWNLOADED: 'dam.document_downloaded',
+  DAM_DOCUMENT_UPLOADED: 'dam.document_uploaded',
 } as const;
 
 export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];

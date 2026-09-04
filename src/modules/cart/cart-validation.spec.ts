@@ -217,3 +217,54 @@ describe('checkCheckoutDetails', () => {
     expect(issues.map((issue) => issue.code)).toEqual(['DELIVERY_DATE_IN_PAST']);
   });
 });
+
+describe('checkLine — the artwork behind a personalised line', () => {
+  const artwork = (available: boolean) => ({
+    templateId: 'tpl_1',
+    name: 'Pharmacy Opening Hours A2',
+    version: 2,
+    available,
+  });
+
+  it('passes a line whose template is still published', () => {
+    const check = checkLine('line-1', 10, product(), artwork(true));
+    expect(check.issues).toEqual([]);
+  });
+
+  it('blocks a line whose template has been withdrawn', () => {
+    // Unlike a quantity, there is nothing the buyer can change to make
+    // withdrawn artwork printable — so it is an issue, not a warning.
+    const check = checkLine('line-1', 10, product(), artwork(false));
+
+    expect(check.issues.map((issue) => issue.code)).toContain('TEMPLATE_UNAVAILABLE');
+    expect(check.warnings).toEqual([]);
+  });
+
+  it('names the design so the buyer knows which line to fix', () => {
+    const check = checkLine('line-1', 10, product(), artwork(false));
+
+    expect(check.issues[0]?.message).toContain('Pharmacy Opening Hours A2');
+  });
+
+  it('leaves a line with no template alone', () => {
+    // A box of envelopes has no artwork, and must not be blocked for lacking it.
+    expect(checkLine('line-1', 10, product(), null).issues).toEqual([]);
+  });
+
+  it('reports the withdrawn template alongside every other problem', () => {
+    // The buyer should see everything wrong with the line at once rather than
+    // discovering the next one after fixing the first.
+    const check = checkLine(
+      'line-1',
+      10,
+      // Stock is only counted for products that track it — print-on-demand has
+      // no shelf to run out of — so the fixture has to opt in.
+      product({ trackInventory: true, availableStock: 0 }),
+      artwork(false),
+    );
+
+    const codes = check.issues.map((issue) => issue.code);
+    expect(codes).toContain('TEMPLATE_UNAVAILABLE');
+    expect(codes).toContain('INSUFFICIENT_STOCK');
+  });
+});

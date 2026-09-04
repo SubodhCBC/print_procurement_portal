@@ -10,6 +10,7 @@ export type { ImportRowResult, ImportOutcome, ImportJobPayload } from './product
 export {
   AssetDerivativeService,
   DerivativeJobSchema,
+  DerivativeTarget,
   derivativeKey,
 } from './asset-derivative.service';
 export type { DerivativeJobPayload } from './asset-derivative.service';

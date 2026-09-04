@@ -35,7 +35,18 @@ import {
 const FULL_ORDER = Prisma.validator<Prisma.OrderInclude>()({
   site: { select: { id: true, code: true, name: true, costCentre: true } },
   account: { select: { id: true, accountCode: true, name: true } },
-  lines: { orderBy: { createdAt: 'asc' } },
+  lines: {
+    orderBy: { createdAt: 'asc' },
+    // The artwork behind a personalised line, joined rather than left as an id.
+    // Whoever fulfils this order needs to know *which* template and *which*
+    // version — an id alone would send them back to the database, and the
+    // version's own name is what makes "Opening Hours A2 v2" readable on a
+    // packing sheet.
+    include: {
+      template: { select: { id: true, code: true, name: true, status: true } },
+      templateVersion: { select: { id: true, version: true, label: true, createdAt: true } },
+    },
+  },
   history: { orderBy: { createdAt: 'asc' } },
 });
 
@@ -208,6 +219,13 @@ export class OrdersService {
             catalogUnitPrice: fromCents(breakdown.catalogUnitPriceCents),
             discountPercent: breakdown.discountPercent.toFixed(2),
             priceSource: breakdown.source,
+            // Carried across with the values, and the reason they mean
+            // anything: a version is immutable, so a reference to it is as good
+            // as a copy of the artwork and costs nothing. Without it an
+            // operator reading this order months later has the answers and not
+            // the question.
+            templateId: line.line.templateId,
+            templateVersionId: line.line.templateVersionId,
             customisation: line.line.customisation ?? Prisma.DbNull,
             notes: line.line.notes,
           };

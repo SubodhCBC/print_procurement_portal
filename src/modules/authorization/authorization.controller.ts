@@ -4,6 +4,7 @@ import {
   ALL_PERMISSIONS,
   basePermissionsFor,
   Permission,
+  PERMISSION_DESCRIPTIONS,
   RequirePermissions,
   Role,
   UserType,
@@ -14,6 +15,14 @@ import {
 export interface PermissionDescriptor {
   readonly key: PermissionValue;
   readonly group: string;
+  /**
+   * What the permission lets somebody do, in the words they would use for it.
+   *
+   * The matrix renders this under the key and searches over it, so an
+   * administrator looking for who may issue an invoice can type "invoice"
+   * rather than having to already know the answer is `BILLING_MANAGE`.
+   */
+  readonly description: string;
 }
 
 export interface RoleBaselineView {
@@ -56,7 +65,11 @@ export class AuthorizationController {
   })
   catalog(): PermissionCatalogView {
     return {
-      permissions: ALL_PERMISSIONS.map((key) => ({ key, group: groupOf(key) })),
+      permissions: ALL_PERMISSIONS.map((key) => ({
+        key,
+        group: groupOf(key),
+        description: PERMISSION_DESCRIPTIONS[key],
+      })),
       roles: [
         {
           role: Role.ADMIN,

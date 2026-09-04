@@ -7,8 +7,30 @@ import { QueueName, RENDER_RETRY } from '@/shared/queue';
 import { PrismaService } from '@/database';
 import { StorageService } from '@/shared/storage';
 
-/** The queue payload: an asset id, never the image bytes. */
-export const DerivativeJobSchema = z.object({ assetId: z.string().min(1).max(64) });
+/**
+ * Which table the asset lives in.
+ *
+ * Product images and template images need exactly the same two derivatives, and
+ * they ride the same queue. What differs is one row's address, so that is all
+ * the payload carries — a second service would mean a second copy of the sharp
+ * pipeline and, worse, a second worker on one queue: BullMQ hands each job to
+ * exactly one worker, so the product worker would consume template jobs, log
+ * that it did not recognise them, and mark them complete. Every template
+ * thumbnail would silently never appear.
+ */
+export const DerivativeTarget = { PRODUCT: 'PRODUCT', TEMPLATE: 'TEMPLATE' } as const;
+export type DerivativeTarget = (typeof DerivativeTarget)[keyof typeof DerivativeTarget];
+
+/**
+ * The queue payload: an asset id and its table, never the image bytes.
+ *
+ * `target` defaults to PRODUCT so jobs enqueued before templates existed still
+ * parse after a deploy — a queue drains what was on it when the code changed.
+ */
+export const DerivativeJobSchema = z.object({
+  assetId: z.string().min(1).max(64),
+  target: z.enum(['PRODUCT', 'TEMPLATE']).default('PRODUCT'),
+});
 export type DerivativeJobPayload = z.infer<typeof DerivativeJobSchema>;
 
 /**
@@ -72,11 +94,11 @@ export class AssetDerivativeService {
    * not a thumbnail can be scheduled. A failure here leaves the asset PENDING,
    * which `sweepPending()` picks up.
    */
-  async enqueue(assetId: string): Promise<void> {
+  async enqueue(assetId: string, target: DerivativeTarget = 'PRODUCT'): Promise<void> {
     try {
       await this.queue.add(
         'product-image-derivatives',
-        { assetId } satisfies DerivativeJobPayload,
+        { assetId, target } satisfies DerivativeJobPayload,
         RENDER_RETRY,
       );
     } catch (error) {
@@ -94,8 +116,8 @@ export class AssetDerivativeService {
    * a product with no thumbnail should be able to see that generation failed
    * and why, instead of assuming the upload did not work.
    */
-  async generate(assetId: string): Promise<void> {
-    const asset = await this.prisma.productAsset.findUnique({ where: { id: assetId } });
+  async generate(assetId: string, target: DerivativeTarget = 'PRODUCT'): Promise<void> {
+    const asset = await this.readAsset(assetId, target);
 
     if (!asset) {
       // The asset was removed between enqueue and run. Not retryable.
@@ -103,17 +125,18 @@ export class AssetDerivativeService {
       return;
     }
 
-    if (asset.kind !== 'IMAGE') {
-      await this.prisma.productAsset.update({
-        where: { id: assetId },
-        data: { derivativeStatus: 'NOT_APPLICABLE' },
-      });
+    // A product asset says it is an image through `kind`; a template asset says
+    // so through its content type, because its `kind` answers a different
+    // question (is this the tile, the mock-up, or artwork inside the design).
+    if (!asset.isImage) {
+      await this.setStatus(assetId, target, 'NOT_APPLICABLE');
       return;
     }
 
     if (asset.sizeBytes > AssetDerivativeService.MAX_SOURCE_BYTES) {
       await this.fail(
         assetId,
+        target,
         `Source is ${Math.round(asset.sizeBytes / 1_048_576)}MB, above the ` +
           `${AssetDerivativeService.MAX_SOURCE_BYTES / 1_048_576}MB limit for derivatives`,
       );
@@ -143,24 +166,27 @@ export class AssetDerivativeService {
         updates[spec.field] = key;
       }
 
-      await this.prisma.productAsset.update({
-        where: { id: assetId },
-        data: {
-          ...updates,
-          widthPx: metadata.width ?? null,
-          heightPx: metadata.height ?? null,
-          derivativeStatus: 'READY',
-          derivativeError: null,
-        },
-      });
+      const data = {
+        ...updates,
+        widthPx: metadata.width ?? null,
+        heightPx: metadata.height ?? null,
+        derivativeStatus: 'READY' as const,
+        derivativeError: null,
+      };
+
+      if (target === 'TEMPLATE') {
+        await this.prisma.templateAsset.update({ where: { id: assetId }, data });
+      } else {
+        await this.prisma.productAsset.update({ where: { id: assetId }, data });
+      }
 
       this.logger.log(
-        `Generated derivatives for asset ${assetId} ` +
+        `Generated derivatives for ${target.toLowerCase()} asset ${assetId} ` +
           `(${metadata.width ?? '?'}x${metadata.height ?? '?'}).`,
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.fail(assetId, message);
+      await this.fail(assetId, target, message);
       // Rethrown so the queue's retry policy applies — a transient storage
       // error deserves another attempt, and the row already says it failed.
       throw error;
@@ -175,19 +201,33 @@ export class AssetDerivativeService {
    * cannot flood the render queue.
    */
   async sweepPending(limit = 100): Promise<number> {
-    const pending = await this.prisma.productAsset.findMany({
-      where: { kind: 'IMAGE', derivativeStatus: 'PENDING' },
-      select: { id: true },
-      orderBy: { createdAt: 'asc' },
-      take: limit,
-    });
+    // The limit is per table rather than shared. Splitting a budget between
+    // them would mean a backlog of product images starving templates of their
+    // thumbnails entirely, which is how one slow import makes an unrelated
+    // gallery look broken.
+    const [products, templates] = await Promise.all([
+      this.prisma.productAsset.findMany({
+        where: { kind: 'IMAGE', derivativeStatus: 'PENDING' },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+        take: limit,
+      }),
+      this.prisma.templateAsset.findMany({
+        where: { contentType: { startsWith: 'image/' }, derivativeStatus: 'PENDING' },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+        take: limit,
+      }),
+    ]);
 
-    for (const asset of pending) await this.enqueue(asset.id);
+    for (const asset of products) await this.enqueue(asset.id, 'PRODUCT');
+    for (const asset of templates) await this.enqueue(asset.id, 'TEMPLATE');
 
-    if (pending.length > 0) {
-      this.logger.log(`Swept ${pending.length} image(s) back onto the derivative queue.`);
+    const total = products.length + templates.length;
+    if (total > 0) {
+      this.logger.log(`Swept ${total} image(s) back onto the derivative queue.`);
     }
-    return pending.length;
+    return total;
   }
 
   /** Deletes the derivative objects for an asset. Best-effort. */
@@ -205,12 +245,55 @@ export class AssetDerivativeService {
     }
   }
 
-  private async fail(assetId: string, message: string): Promise<void> {
-    await this.prisma.productAsset.update({
-      where: { id: assetId },
-      data: { derivativeStatus: 'FAILED', derivativeError: message.slice(0, 500) },
-    });
-    this.logger.warn(`Derivatives failed for asset ${assetId}: ${message}`);
+  /**
+   * The one shape this service needs from either asset table.
+   *
+   * Narrow on purpose: everything else about a product asset and a template
+   * asset differs, and a wider type would tempt this service into caring.
+   */
+  private async readAsset(
+    assetId: string,
+    target: DerivativeTarget,
+  ): Promise<{ storageKey: string; sizeBytes: number; isImage: boolean } | null> {
+    if (target === 'TEMPLATE') {
+      const asset = await this.prisma.templateAsset.findUnique({ where: { id: assetId } });
+      return asset
+        ? {
+            storageKey: asset.storageKey,
+            sizeBytes: asset.sizeBytes,
+            isImage: asset.contentType.startsWith('image/'),
+          }
+        : null;
+    }
+
+    const asset = await this.prisma.productAsset.findUnique({ where: { id: assetId } });
+    return asset
+      ? {
+          storageKey: asset.storageKey,
+          sizeBytes: asset.sizeBytes,
+          isImage: asset.kind === 'IMAGE',
+        }
+      : null;
+  }
+
+  private async setStatus(
+    assetId: string,
+    target: DerivativeTarget,
+    derivativeStatus: 'NOT_APPLICABLE' | 'FAILED',
+    derivativeError?: string,
+  ): Promise<void> {
+    const data = { derivativeStatus, ...(derivativeError ? { derivativeError } : {}) };
+
+    if (target === 'TEMPLATE') {
+      await this.prisma.templateAsset.update({ where: { id: assetId }, data });
+    } else {
+      await this.prisma.productAsset.update({ where: { id: assetId }, data });
+    }
+  }
+
+  private async fail(assetId: string, target: DerivativeTarget, message: string): Promise<void> {
+    await this.setStatus(assetId, target, 'FAILED', message.slice(0, 500));
+    this.logger.warn(`Derivatives failed for ${target.toLowerCase()} asset ${assetId}: ${message}`);
   }
 
   /**

@@ -46,6 +46,7 @@ export interface AuthenticatedUserView {
   readonly siteId: string | null;
   readonly siteCode: string | null;
   readonly siteName: string | null;
+  readonly phone: string | null;
   readonly department: string | null;
   /** The user's own ceiling, else the site's, else null for uncapped. */
   readonly monthlyBudgetCap: number | null;
@@ -90,6 +91,7 @@ export function toUserView(record: AuthenticatedUserRecord): AuthenticatedUserVi
     siteId: site?.id ?? null,
     siteCode: site?.code ?? null,
     siteName: site?.name ?? null,
+    phone: user.phone,
     department: user.department,
     // The user's own cap wins when set — see the schema note on User.
     // monthlyBudgetCap: a branch budget is not a per-buyer limit.

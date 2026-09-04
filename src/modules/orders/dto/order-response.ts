@@ -89,6 +89,24 @@ export interface OrderLineView {
   readonly discountPercent: string;
   /** Which pricing rule produced the unit price. */
   readonly priceSource: string;
+  /**
+   * The artwork this line was personalised from, when it was.
+   *
+   * Null for a line with no template — a box of envelopes. Present, it is what
+   * lets an operator reconstruct what to print: the version is immutable, so
+   * `templateVersion.version` names artwork that cannot have moved since the
+   * order was placed.
+   */
+  readonly template: {
+    readonly id: string;
+    readonly code: string;
+    readonly name: string;
+    readonly status: string;
+    readonly versionId: string;
+    readonly version: number;
+    readonly versionLabel: string | null;
+    readonly publishedAt: string;
+  } | null;
   readonly customisation: unknown;
   readonly notes: string | null;
 }
@@ -182,6 +200,19 @@ function toOrderLineView(line: FullOrder['lines'][number]): OrderLineView {
     catalogUnitPrice: line.catalogUnitPrice.toFixed(2),
     discountPercent: line.discountPercent.toFixed(2),
     priceSource: line.priceSource,
+    template:
+      line.template && line.templateVersion
+        ? {
+            id: line.template.id,
+            code: line.template.code,
+            name: line.template.name,
+            status: line.template.status,
+            versionId: line.templateVersion.id,
+            version: line.templateVersion.version,
+            versionLabel: line.templateVersion.label,
+            publishedAt: line.templateVersion.createdAt.toISOString(),
+          }
+        : null,
     customisation: line.customisation ?? null,
     notes: line.notes,
   };

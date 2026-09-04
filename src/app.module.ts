@@ -23,7 +23,9 @@ import { OrdersModule } from './modules/orders';
 import { ApprovalsModule } from './modules/approvals';
 import { BillingModule } from './modules/billing';
 import { ReportsModule } from './modules/reports';
+import { TemplatesModule } from './modules/templates';
 import { SitesModule } from './modules/sites';
+import { SettingsModule } from './modules/settings';
 import { UsersModule } from './modules/users';
 
 const config = loadConfig();
@@ -72,8 +74,12 @@ const config = loadConfig();
     AuditModule,
     AccountsModule,
     SitesModule,
+    SettingsModule,
     UsersModule,
     CatalogModule,
+    // After CatalogModule: a template prints onto a product, and its tiles ride
+    // the catalogue's derivative pipeline.
+    TemplatesModule,
     // After CatalogModule: pricing reads products through it, and the
     // dependency deliberately runs one way.
     PricingModule,

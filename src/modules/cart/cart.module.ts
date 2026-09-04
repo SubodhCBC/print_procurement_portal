@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PricingModule } from '@/modules/pricing';
+import { TemplatesModule } from '@/modules/templates';
 import { CartController } from './cart.controller';
 import { CartService } from './cart.service';
 
@@ -19,7 +20,11 @@ import { CartService } from './cart.service';
  * the second half failed.
  */
 @Module({
-  imports: [PricingModule],
+  // TemplatesModule so a personalised line can be checked against the artwork
+  // it claims to come from — published, visible to this buyer, and the version
+  // currently live. Templates knows nothing about carts, so the dependency runs
+  // one way.
+  imports: [PricingModule, TemplatesModule],
   controllers: [CartController],
   providers: [CartService],
   exports: [CartService],

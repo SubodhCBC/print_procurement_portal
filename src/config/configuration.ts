@@ -58,6 +58,20 @@ export interface AppConfig {
     readonly publicBaseUrl: string;
     readonly presignExpirySeconds: number;
   };
+  /**
+   * The digital asset manager (ARCH section 8).
+   *
+   * Every field but the timeout is optional because the DAM is not live yet.
+   * DamIntegrationService treats "enabled but unconfigured" as an outage with a
+   * message naming the missing variable, rather than as a quiet no-op.
+   */
+  readonly dam: {
+    readonly enabled: boolean;
+    readonly baseUrl?: string;
+    readonly apiKey?: string;
+    readonly timeoutMs: number;
+    readonly defaultFolder?: string;
+  };
   readonly auth: {
     readonly accessSecret: string;
     readonly accessTtl: string;
@@ -175,6 +189,13 @@ function toAppConfig(env: RawEnv): AppConfig {
       forcePathStyle: env.S3_FORCE_PATH_STYLE,
       publicBaseUrl: env.S3_PUBLIC_BASE_URL,
       presignExpirySeconds: env.S3_PRESIGN_EXPIRY_SECONDS,
+    },
+    dam: {
+      enabled: env.DAM_ENABLED,
+      baseUrl: env.DAM_BASE_URL,
+      apiKey: env.DAM_API_KEY,
+      timeoutMs: env.DAM_TIMEOUT_MS,
+      defaultFolder: env.DAM_DEFAULT_FOLDER,
     },
     auth: {
       accessSecret: env.JWT_ACCESS_SECRET,

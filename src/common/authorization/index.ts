@@ -1,1 +1,7 @@
-export { ALL_PERMISSIONS, basePermissionsFor, isPermission, Permission } from './permissions';
+export {
+  ALL_PERMISSIONS,
+  basePermissionsFor,
+  isPermission,
+  Permission,
+  PERMISSION_DESCRIPTIONS,
+} from './permissions';

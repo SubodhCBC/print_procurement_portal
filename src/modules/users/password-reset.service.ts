@@ -201,6 +201,58 @@ export class PasswordResetService {
     this.logger.log(`Password reset completed for user ${record.userId}; sessions revoked.`);
   }
 
+  /**
+   * Change a signed-in user's own password.
+   *
+   * Unlike `complete` this proves the old credential first, so a token lifted
+   * from an unlocked machine cannot be used to take the account over. Failure
+   * is deliberately one message for both "no local password" and "wrong
+   * password": distinguishing them tells an attacker holding a stolen token
+   * which accounts are legacy-backed and therefore not worth attacking here.
+   *
+   * Every refresh token is revoked afterwards, so no session anywhere can be
+   * renewed — if the reason for the change was that somebody else held the old
+   * password, their session dies at its next refresh.
+   *
+   * Access tokens are stateless and are *not* revoked: one already issued keeps
+   * working until it expires, up to fifteen minutes later. Saying this outright
+   * matters, because "signs you out everywhere" is what a user will assume and
+   * it is not quite true. Killing the window entirely needs a denylist checked
+   * on every request, which is a different design decision from this one.
+   */
+  async change(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthenticatedError('Sign in again to change your password');
+
+    const wrong = new BusinessRuleError('That is not your current password');
+
+    // A legacy user whose password still lives upstream has no local hash to
+    // check against, so there is nothing here to change.
+    if (!user.passwordHash) throw wrong;
+    if (!(await this.hasher.verify(currentPassword, user.passwordHash))) throw wrong;
+
+    const passwordHash = await this.hasher.hash(newPassword);
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash, mustChangePassword: false },
+    });
+
+    await this.tokens.revokeAllForUser(userId);
+
+    await this.audit.record({
+      action: AuditAction.PASSWORD_CHANGED,
+      entityType: 'USER',
+      entityId: userId,
+      entityName: `${user.firstName} ${user.lastName}`.trim() || user.login,
+      accountId: user.accountId,
+      actor: this.selfActor(user),
+      details: { sessionsRevoked: true },
+    });
+
+    this.logger.log(`Password changed by user ${userId}; sessions revoked.`);
+  }
+
   /** The user acting on their own credential, for the two unauthenticated steps. */
   private selfActor(user: User) {
     return {

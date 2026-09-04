@@ -57,6 +57,21 @@ export interface CartLineView {
   readonly orderMultiple: number;
   readonly packSize: number;
   readonly leadTimeDays: number | null;
+  /**
+   * The artwork this line was personalised from. Null for a line with none.
+   *
+   * `available` is false once the template has been unpublished, archived or
+   * deleted — validation blocks checkout on it, and the basket says so rather
+   * than letting the buyer discover it at the last step.
+   */
+  readonly template: {
+    readonly id: string;
+    readonly code: string;
+    readonly name: string;
+    readonly versionId: string;
+    readonly version: number;
+    readonly available: boolean;
+  } | null;
   readonly customisation: unknown;
   readonly notes: string | null;
   readonly addedAt: string;
@@ -107,6 +122,17 @@ function toCartLineView(line: CartLineRow): CartLineView {
     orderMultiple: line.product.orderMultiple,
     packSize: line.product.packSize,
     leadTimeDays: line.product.leadTimeDays,
+    template:
+      line.template && line.templateVersion
+        ? {
+            id: line.template.id,
+            code: line.template.code,
+            name: line.template.name,
+            versionId: line.templateVersion.id,
+            version: line.templateVersion.version,
+            available: line.template.status === 'PUBLISHED' && line.template.deletedAt === null,
+          }
+        : null,
     customisation: line.customisation ?? null,
     notes: line.notes,
     addedAt: line.createdAt.toISOString(),

@@ -80,6 +80,83 @@ export type Permission = (typeof Permission)[keyof typeof Permission];
 export const ALL_PERMISSIONS: readonly Permission[] = Object.values(Permission);
 
 /**
+ * What each permission actually lets somebody do, in the words they would use.
+ *
+ * Typed as a total record, so adding a permission without describing it does
+ * not compile. That is the point: the settings matrix renders these, and a
+ * permission with no description there is a row an administrator has to guess
+ * at — `ORDER_VIEW_SITE` against `ORDER_VIEW_ACCOUNT` is unreadable from the
+ * key alone.
+ *
+ * Written in the vocabulary of the task rather than of the code, because the
+ * matrix's search runs over this text: somebody looking for who may issue an
+ * invoice searches "invoice", not "BILLING_MANAGE".
+ */
+export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
+  // --- Application-wide -----------------------------------------------------
+  [Permission.APPLICATION_VIEW]: 'Sign in and open the portal at all.',
+  [Permission.APPLICATION_CREATE]: 'Create records in the general parts of the portal.',
+  [Permission.APPLICATION_EDIT]: 'Edit records in the general parts of the portal.',
+  [Permission.APPLICATION_DELETE]: 'Delete records in the general parts of the portal.',
+
+  // --- Document Access Management -------------------------------------------
+  [Permission.DAM_VIEW]: 'Browse the document library and see what it holds.',
+  [Permission.DAM_UPLOAD]: 'Add artwork, proofs and other files to the library.',
+  [Permission.DAM_DOWNLOAD]: 'Download files from the library, including print-ready artwork.',
+  [Permission.DAM_DELETE]: 'Remove files from the library permanently.',
+  [Permission.EXTERNAL_DOCUMENT_ACCESS]:
+    'Reach named documents and nothing else — held by external collaborators, ' +
+    'always alongside a per-document grant.',
+
+  // --- Catalog and pricing ---------------------------------------------------
+  [Permission.CATALOG_VIEW]: 'Browse the product catalogue and open a product page.',
+  [Permission.CATALOG_MANAGE]:
+    'Create and edit products, categories, options and variants; publish and retire them.',
+  [Permission.PRICING_VIEW]: 'See contract prices and rate cards.',
+  [Permission.PRICING_MANAGE]:
+    'Create and edit rate cards, negotiated line prices and volume tiers.',
+
+  // --- Ordering --------------------------------------------------------------
+  [Permission.ORDER_CREATE]: 'Add items to a basket and place an order.',
+  [Permission.ORDER_VIEW_OWN]: 'See the orders you placed yourself, and nobody else’s.',
+  [Permission.ORDER_VIEW_SITE]: 'See every order for the branches you are attached to.',
+  [Permission.ORDER_VIEW_ACCOUNT]: 'See every order in the account, across all of its branches.',
+  [Permission.ORDER_CANCEL]: 'Cancel an order that has not yet gone into production.',
+  [Permission.ORDER_MANAGE]:
+    'Move an order through fulfilment — into production, dispatched, delivered. The ' +
+    'platform operator’s, not the customer’s.',
+  [Permission.APPROVAL_ACT]: 'Approve, reject or send back an order that is waiting on a decision.',
+
+  // --- Templates -------------------------------------------------------------
+  [Permission.TEMPLATE_USE]:
+    'Personalise a published template — fill in the editable fields and order from it.',
+  [Permission.TEMPLATE_MANAGE]: 'Create, edit and publish master templates in the builder studio.',
+
+  // --- Billing, inventory, reporting ----------------------------------------
+  [Permission.BILLING_VIEW]: 'See invoices, billing periods and what is still unbilled.',
+  [Permission.BILLING_MANAGE]:
+    'Generate, issue, void and mark invoices paid; run the monthly billing.',
+  [Permission.INVENTORY_VIEW]: 'See stock on hand and what is reserved against orders.',
+  [Permission.INVENTORY_MANAGE]:
+    'Adjust stock levels, reconcile counts and receive deliveries into the warehouse.',
+  [Permission.REPORT_VIEW]: 'Open the reporting dashboards — spend, orders, top products.',
+  [Permission.AUDIT_VIEW]: 'Read the audit trail of who changed what, and when.',
+
+  // --- Administration --------------------------------------------------------
+  [Permission.USER_INVITE]: 'Invite a new user and re-send an invitation.',
+  [Permission.USER_MANAGE]:
+    'Edit users, change their role, deactivate them, and grant or revoke individual ' +
+    'permissions.',
+  [Permission.SITE_MANAGE]:
+    'Create and edit branches, their delivery addresses, budgets and purchase-order rules.',
+  [Permission.ACCOUNT_MANAGE]:
+    'Edit the customer account and its settings — currency, timezone, checkout rules, ' +
+    'alert routing.',
+  [Permission.INTEGRATION_MANAGE]:
+    'Configure outbound integrations and the credentials they authenticate with.',
+};
+
+/**
  * A site user: browse the catalog, personalise a template, place an order for
  * their own branch, and see what they ordered.
  */

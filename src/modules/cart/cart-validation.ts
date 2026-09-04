@@ -28,6 +28,7 @@ export const CartIssueCode = {
   QUANTITY_BELOW_MOQ: 'QUANTITY_BELOW_MOQ',
   QUANTITY_NOT_MULTIPLE: 'QUANTITY_NOT_MULTIPLE',
   INSUFFICIENT_STOCK: 'INSUFFICIENT_STOCK',
+  TEMPLATE_UNAVAILABLE: 'TEMPLATE_UNAVAILABLE',
   PO_REQUIRED: 'PO_REQUIRED',
   PO_PREFIX_MISMATCH: 'PO_PREFIX_MISMATCH',
   PO_TOO_SHORT: 'PO_TOO_SHORT',
@@ -73,6 +74,21 @@ export interface LineProductFacts {
   readonly variant: { readonly id: string; readonly sku: string; readonly active: boolean } | null;
 }
 
+/**
+ * What the validator needs to know about a line's artwork.
+ *
+ * Null when the line names no template. A line that does name one is only
+ * printable while that template is still published: a designer who archives
+ * artwork has withdrawn it, and a basket assembled beforehand must not walk
+ * past that on the way to a printing press.
+ */
+export interface LineTemplateFacts {
+  readonly templateId: string;
+  readonly name: string;
+  readonly version: number;
+  readonly available: boolean;
+}
+
 export interface LineCheck {
   readonly lineId: string;
   readonly quantity: number;
@@ -94,9 +110,24 @@ export function checkLine(
   lineId: string,
   quantity: number,
   product: LineProductFacts | null,
+  template: LineTemplateFacts | null = null,
 ): LineCheck {
   const issues: CartIssue[] = [];
   const warnings: CartIssue[] = [];
+
+  // Checked before the product, and blocking. Unlike a quantity, there is
+  // nothing the buyer can change to make withdrawn artwork printable — the
+  // line has to go back to the customiser or out of the basket.
+  if (template && !template.available) {
+    issues.push({
+      code: CartIssueCode.TEMPLATE_UNAVAILABLE,
+      message:
+        `The design "${template.name}" is no longer available. ` +
+        'Remove this line, or personalise a current template instead.',
+      lineId,
+      details: { templateId: template.templateId, version: template.version },
+    });
+  }
 
   if (!product) {
     // The product is gone, or the buyer may no longer see it. Both are reported

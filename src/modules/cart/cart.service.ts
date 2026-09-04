@@ -10,6 +10,11 @@ import {
 import { PrismaService, withTenantScope } from '@/database';
 import { ORDERABLE_STATUSES, roundToOrderable } from '@/modules/catalog';
 import { PricingService, type QuotedLine } from '@/modules/pricing';
+import { TemplatesService } from '@/modules/templates';
+// The pure rules file, not the templates barrel: this needs one function and
+// the barrel would pull the service's whole dependency chain in behind it.
+import { acceptCustomisation, type TemplateLayerLike } from '@/modules/templates/template-status';
+import { readSnapshot } from '@/modules/templates/dto/template-response';
 // Imported from the file rather than from '@/modules/orders': that barrel
 // re-exports OrdersService, which depends on this service, and the cycle would
 // be real at runtime. `order-status.ts` is pure and has no imports of its own,
@@ -75,6 +80,13 @@ const FULL_CART = Prisma.validator<Prisma.CartInclude>()({
           stockReserved: true,
         },
       },
+      // `status` and `deletedAt` are read by validation, not by the view: a
+      // template withdrawn while a basket sat is a line that cannot be printed,
+      // and the buyer has to be told before they check out rather than after.
+      template: {
+        select: { id: true, code: true, name: true, status: true, deletedAt: true },
+      },
+      templateVersion: { select: { id: true, version: true, label: true } },
     },
     orderBy: { createdAt: 'asc' },
   },
@@ -151,6 +163,7 @@ export class CartService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly pricing: PricingService,
+    private readonly templates: TemplatesService,
   ) {}
 
   // --- Reading and creating the basket ----------------------------------------
@@ -186,6 +199,94 @@ export class CartService {
     });
   }
 
+  // --- Template personalisation -------------------------------------------------
+
+  /**
+   * Resolves the artwork a line was personalised from, and rebuilds the values
+   * it may carry.
+   *
+   * ---------------------------------------------------------------------------
+   * What this closes
+   * ---------------------------------------------------------------------------
+   * A basket line used to hold `customisation` and nothing that said which
+   * artwork the values belonged to. An operator saw the answers without the
+   * question, and `{"disclaimer": "No conditions apply."}` was as acceptable as
+   * a branch name — there was no template to check it against.
+   *
+   * Three things are enforced here, and the third is the one that matters:
+   *
+   * 1. **The template must be published and visible to this buyer.** Delegated
+   *    to `TemplatesService.getCustomisable`, which is the same call the
+   *    customiser made — so the basket cannot accept a template the storefront
+   *    would not have shown.
+   *
+   * 2. **The version must be the one currently published.** A stale id means
+   *    the buyer had the customiser open while a designer republished; their
+   *    values were checked against artwork that is no longer live, so they are
+   *    sent back rather than pinned to something nobody can see any more.
+   *
+   * 3. **The values are rebuilt from that version's editable layers.** Not
+   *    filtered — rebuilt, by `acceptCustomisation`. A key aimed at a locked
+   *    layer cannot survive a rebuild the way it survives a check somebody
+   *    later forgets to run.
+   *
+   * Returns nulls when no template is named: a box of envelopes has no artwork,
+   * and its `customisation` stays free-form as it always was.
+   */
+  private async resolveTemplateSelection(
+    actor: AuthenticatedActor,
+    selection: {
+      readonly templateId?: string | null;
+      readonly templateVersionId?: string | null;
+      readonly customisation?: Record<string, unknown> | null;
+    },
+  ): Promise<{
+    templateId: string | null;
+    templateVersionId: string | null;
+    customisation: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  }> {
+    const raw = selection.customisation ?? null;
+
+    if (!selection.templateId || !selection.templateVersionId) {
+      return {
+        templateId: null,
+        templateVersionId: null,
+        customisation: raw === null ? Prisma.DbNull : (raw as Prisma.InputJsonValue),
+      };
+    }
+
+    // Throws 404 when the template is unpublished, deleted, or restricted to
+    // another account — deliberately the same answer for all three, so a basket
+    // cannot be used to enumerate the library.
+    const { version } = await this.templates.getCustomisable(actor, selection.templateId);
+
+    if (version.id !== selection.templateVersionId) {
+      throw new BusinessRuleError(
+        'This template has been updated since you personalised it. ' +
+          'Open the customiser again so your details are checked against the new artwork.',
+        {
+          details: {
+            templateId: selection.templateId,
+            sentVersionId: selection.templateVersionId,
+            publishedVersionId: version.id,
+          },
+        },
+      );
+    }
+
+    const snapshot = readSnapshot(version.snapshot);
+    const accepted = acceptCustomisation(
+      snapshot.layers as unknown as readonly TemplateLayerLike[],
+      raw ?? {},
+    );
+
+    return {
+      templateId: selection.templateId,
+      templateVersionId: version.id,
+      customisation: accepted,
+    };
+  }
+
   // --- Lines ------------------------------------------------------------------
 
   /**
@@ -207,16 +308,22 @@ export class CartService {
     // their own branch-less one, which looks like the add silently failing.
     const cart = await this.openCart(actor, requestedSiteId);
     const product = await this.requireOrderableProduct(actor, dto.productId, dto.variantId ?? null);
+    const selection = await this.resolveTemplateSelection(actor, dto);
 
     await withTenantScope(this.prisma, actor.accountId, async (tx) => {
+      // Only a plain line merges: no personalisation *and* no artwork behind
+      // it. A line naming a template is a specific print run even when its
+      // fields happen to be empty, and adding quantities across two of them
+      // would silently destroy one.
       const mergeable =
-        dto.customisation == null
+        dto.customisation == null && selection.templateId === null
           ? await tx.cartLine.findFirst({
               where: {
                 cartId: cart.id,
                 productId: dto.productId,
                 variantId: dto.variantId ?? null,
                 customisation: { equals: Prisma.DbNull },
+                templateId: null,
               },
             })
           : null;
@@ -236,7 +343,9 @@ export class CartService {
           productId: dto.productId,
           variantId: dto.variantId ?? null,
           quantity: dto.quantity,
-          customisation: dto.customisation ?? Prisma.DbNull,
+          templateId: selection.templateId,
+          templateVersionId: selection.templateVersionId,
+          customisation: selection.customisation,
           notes: dto.notes ?? null,
         },
       });
@@ -253,14 +362,44 @@ export class CartService {
   ): Promise<FullCart> {
     const cart = await this.requireOwnedLine(actor, lineId);
 
+    const existing = await withTenantScope(this.prisma, actor.accountId, (tx) =>
+      tx.cartLine.findUniqueOrThrow({
+        where: { id: lineId },
+        select: { templateId: true, templateVersionId: true },
+      }),
+    );
+
+    // Editing the values of a line that already names a template must go
+    // through the same rebuild. The template is taken from the line rather than
+    // from the request when the request is silent about it — otherwise a
+    // buyer could strip `templateId` from a PATCH and turn a checked
+    // personalisation back into a free-form bag of values.
+    const namesTemplate = dto.templateId !== undefined || dto.templateVersionId !== undefined;
+    const touchesValues = dto.customisation !== undefined;
+
+    const selection =
+      namesTemplate || (touchesValues && existing.templateId)
+        ? await this.resolveTemplateSelection(actor, {
+            templateId: namesTemplate ? dto.templateId : existing.templateId,
+            templateVersionId: namesTemplate ? dto.templateVersionId : existing.templateVersionId,
+            customisation: dto.customisation ?? null,
+          })
+        : null;
+
     await withTenantScope(this.prisma, actor.accountId, (tx) =>
       tx.cartLine.update({
         where: { id: lineId },
         data: {
           ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
-          ...(dto.customisation !== undefined
-            ? { customisation: dto.customisation ?? Prisma.DbNull }
-            : {}),
+          ...(selection
+            ? {
+                templateId: selection.templateId,
+                templateVersionId: selection.templateVersionId,
+                customisation: selection.customisation,
+              }
+            : dto.customisation !== undefined
+              ? { customisation: dto.customisation ?? Prisma.DbNull }
+              : {}),
           ...(dto.notes !== undefined ? { notes: dto.notes } : {}),
         },
       }),
@@ -411,9 +550,22 @@ export class CartService {
       // another customer's contract line.
       const facts = visibleProducts.has(line.productId) ? this.factsFor(line) : null;
 
+      // A template withdrawn since the line was added. Read from the joined
+      // row rather than re-queried: the basket already loaded it, and one more
+      // round trip per line to learn a status it is holding would be waste.
+      const template =
+        line.template && line.templateVersion
+          ? {
+              templateId: line.template.id,
+              name: line.template.name,
+              version: line.templateVersion.version,
+              available: line.template.status === 'PUBLISHED' && line.template.deletedAt === null,
+            }
+          : null;
+
       return {
         line,
-        check: checkLine(line.id, line.quantity, facts),
+        check: checkLine(line.id, line.quantity, facts, template),
         quote: quoteByLine.get(quoteKey(line.productId, this.orderableQuantityOf(line))) ?? null,
       };
     });

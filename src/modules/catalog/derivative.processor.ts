@@ -7,10 +7,14 @@ import { AssetDerivativeService, DerivativeJobSchema } from './asset-derivative.
 /**
  * Drains the `render` queue for product-image derivatives.
  *
- * The first consumer on that queue. It will not be the only one — the template
- * builder's CMYK PDF render belongs here too — which is why the job name is
- * checked rather than assumed: a render worker will eventually see more than
- * one kind of job and must not try to resize a template.
+ * The only consumer on that queue today, and deliberately so. BullMQ hands each
+ * job to exactly one worker, so a second `@Processor(RENDER)` elsewhere would
+ * quietly eat this one's jobs and mark them complete. Anything new that needs
+ * the render queue — the template builder's CMYK PDF, for one — dispatches from
+ * here on the job name rather than by adding a worker.
+ *
+ * The name is still checked rather than assumed, for that same eventual second
+ * kind of job: an unrecognised name is left alone, not failed.
  *
  * Concurrency is fixed at two rather than read from RENDER_CONCURRENCY: the
  * decorator needs a static value, and image decoding is memory-hungry enough
@@ -36,8 +40,8 @@ export class DerivativeProcessor extends WorkerHost {
       return;
     }
 
-    const { assetId } = DerivativeJobSchema.parse(job.data);
-    await this.derivatives.generate(assetId);
+    const { assetId, target } = DerivativeJobSchema.parse(job.data);
+    await this.derivatives.generate(assetId, target);
   }
 
   @OnWorkerEvent('failed')

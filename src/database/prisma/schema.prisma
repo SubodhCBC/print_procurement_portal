@@ -116,6 +116,7 @@ model Account {
   permissionGrants  UserPermissionGrant[]
   auditLog          AuditLogEntry[]
   productVisibility ProductAccountVisibility[]
+  templateVisibility TemplateAccountVisibility[]
   catalogImports    CatalogImportJob[]
   rateCards         RateCard[]
   carts             Cart[]
@@ -123,8 +124,70 @@ model Account {
   approvalRules     ApprovalRule[]
   approvalRequests  ApprovalRequest[]
   invoices          Invoice[]
+  settings          AccountSettings?
 
   @@map("accounts")
+}
+
+/// Operational preferences for an account: locale, ordering rules, alert
+/// routing and session policy.
+///
+/// A separate table rather than more columns on `Account` because the two have
+/// opposite access patterns. Every authentication reads the account row, and
+/// none of it needs the timezone or the low-stock threshold; these are read on
+/// one settings screen and written by hand a few times a year. Keeping them
+/// apart leaves the hot row narrow.
+///
+/// The row is created on demand — `SettingsService.forAccount` upserts — so an
+/// account that has never opened the screen still reads its defaults rather
+/// than a null.
+model AccountSettings {
+  id String @id
+
+  accountId String  @unique
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  // --- Locale ----------------------------------------------------------------
+  /// ISO 4217. Reporting and invoicing only: prices are stored as NUMERIC and
+  /// carry no currency of their own, so changing this does not convert them.
+  currency String @default("USD")
+  /// IANA zone name. Decides the day a report bucket starts on and the period
+  /// an order is billed into, both of which move across a date boundary.
+  timezone String @default("UTC")
+
+  // --- Ordering --------------------------------------------------------------
+  /// Prefix for platform order numbers. Distinct from `Account.poPrefix`, which
+  /// is the customer's own purchase-order series.
+  orderNumberPrefix String?
+  /// Hold a line at its minimum order quantity instead of reporting the
+  /// shortfall and letting the buyer proceed.
+  enforceMoq           Boolean @default(true)
+  /// Accept an order for stock that is not on hand.
+  allowBackorders      Boolean @default(false)
+  requireDeliveryNotes Boolean @default(false)
+
+  // --- Notifications ---------------------------------------------------------
+  sendOrderConfirmations   Boolean @default(true)
+  /// Where operational alerts go. Null falls back to `Account.contactEmail`.
+  notificationEmail        String?
+  sendLowStockAlerts       Boolean @default(true)
+  /// Units on hand at or below which the low-stock alert fires.
+  lowStockAlertThreshold   Int     @default(50)
+  sendMonthlyBillingDigest Boolean @default(true)
+
+  // --- Session policy --------------------------------------------------------
+  /// Minutes of inactivity before the client signs the user out. Advisory: the
+  /// access token's own 15-minute lifetime is what the API enforces, and this
+  /// cannot extend it.
+  sessionTimeoutMinutes Int     @default(60)
+  /// Recorded, not yet enforced — there is no second-factor enrolment. Reading
+  /// it as "2FA is on" would be wrong until there is.
+  enforceTwoFactor      Boolean @default(false)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@map("account_settings")
 }
 
 enum AccountStatus {
@@ -366,6 +429,9 @@ model User {
   approvalRules    ApprovalRule[]        @relation("ApprovalRuleApprover")
   approvalSteps    ApprovalStep[]        @relation("ApprovalStepApprover")
   approvalsDecided ApprovalStep[]        @relation("ApprovalStepDecider")
+  templatesCreated Template[]            @relation("TemplateCreatedBy")
+  templatesUpdated Template[]            @relation("TemplateUpdatedBy")
+  templateVersions TemplateVersion[]     @relation("TemplateVersionAuthor")
 
   @@index([accountId])
   @@index([email])
@@ -681,6 +747,7 @@ model ProductCategory {
   deletedAt DateTime? @db.Timestamptz(3)
 
   products      Product[]
+  templates     Template[]
   approvalRules ApprovalRule[]
 
   @@index([status, sortOrder])
@@ -824,6 +891,7 @@ model Product {
   volumeTiers   ProductVolumeTier[]
   assets        ProductAsset[]
   visibleTo     ProductAccountVisibility[]
+  templates     Template[]
   rateCardItems RateCardItem[]
   cartLines     CartLine[]
   orderLines    OrderLineItem[]
@@ -1324,9 +1392,31 @@ model CartLine {
   /// see the adjustment, rather than applied silently on the way in.
   quantity Int
 
+  /// The template this line was personalised from, and the exact published
+  /// version of it the buyer saw.
+  ///
+  /// Both or neither: a product with no artwork — a box of envelopes — carries
+  /// no template, and the database enforces the pairing. Without the version,
+  /// `customisation` is a bag of values nobody can place on a page: "businessName
+  /// = Apex" says nothing about which poster, in what font, where.
+  ///
+  /// The version is pinned rather than followed. A designer who republishes
+  /// while this basket sits must not silently change the artwork the buyer
+  /// agreed to; cart validation reports that a newer version exists and lets
+  /// them re-personalise, which is a choice rather than a surprise.
+  templateId String?
+  template   Template? @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  templateVersionId String?
+  templateVersion   TemplateVersion? @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+
   /// Personalisation captured by the template customiser (FE-03) — artwork
-  /// field values, finish choices, an uploaded asset key. Opaque here; BE-06
-  /// snapshots it onto the order line, and INT-01 sends it to production.
+  /// field values, finish choices, an uploaded asset key.
+  ///
+  /// Validated against `templateVersion`'s editable layers when one is set, so
+  /// a value aimed at a layer the designer locked cannot reach production. Free
+  /// form when no template is named. BE-06 snapshots it onto the order line and
+  /// INT-01 sends it on; neither interprets it.
   customisation Json?
 
   /// Per-line instruction from the buyer, distinct from the cart-wide note.
@@ -1613,7 +1703,22 @@ model OrderLineItem {
   bleedMm      Decimal? @db.Decimal(5, 2)
   safeMarginMm Decimal? @db.Decimal(5, 2)
 
+  /// The template and the exact version this line was personalised from,
+  /// copied from the basket at checkout.
+  ///
+  /// A reference rather than a copy of the artwork, and safe as one precisely
+  /// because a version is immutable: the row it points at cannot be edited, and
+  /// an archived or deleted template keeps its versions for exactly this
+  /// reason. This is what lets an operator — and later INT-01 — reconstruct
+  /// what to print from an order placed months ago.
+  templateId String?
+  template   Template? @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  templateVersionId String?
+  templateVersion   TemplateVersion? @relation(fields: [templateVersionId], references: [id], onDelete: Restrict)
+
   /// Personalisation from the template customiser, carried through unchanged.
+  /// Validated against the version above at the time it entered the basket.
   customisation Json?
   notes         String?
 
@@ -1621,6 +1726,8 @@ model OrderLineItem {
 
   @@index([orderId])
   @@index([productId])
+  /// The fulfilment lookup: every line waiting on one version of one artwork.
+  @@index([templateVersionId])
   @@map("order_line_items")
 }
 
@@ -1964,4 +2071,285 @@ model InvoiceSequence {
   updatedAt DateTime @updatedAt @db.Timestamptz(3)
 
   @@map("invoice_sequences")
+}
+
+// --- Templates ---------------------------------------------------------------
+
+/// Where a template is in its life.
+enum TemplateStatus {
+  /// Being designed. Reachable only by someone holding TEMPLATE_MANAGE.
+  DRAFT
+  /// Live in the storefront — but what a buyer renders is the published
+  /// *version*, never this working copy. See the note on Template.
+  PUBLISHED
+  /// Withdrawn from the storefront. Kept, because orders reference the version
+  /// they were personalised from and that reference must not dangle.
+  ARCHIVED
+}
+
+/// Who may see a published template. Mirrors ProductVisibility deliberately:
+/// the two are asked the same question by the same screens, and answering it
+/// two different ways is how one of them eventually gets it wrong.
+enum TemplateVisibility {
+  ALL_ACCOUNTS
+  RESTRICTED
+}
+
+enum TemplateOrientation {
+  LANDSCAPE
+  PORTRAIT
+  SQUARE
+}
+
+/// The unit `widthValue`, `heightValue` and the margins are expressed in.
+enum TemplateDimensionUnit {
+  IN
+  MM
+  PX
+}
+
+enum TemplateAssetKind {
+  /// The listing tile. At most one per template.
+  THUMBNAIL
+  /// The larger mock-up on the template's own page. At most one.
+  PREVIEW
+  /// Imagery placed inside the design itself. Any number.
+  SOURCE
+}
+
+/// A master artwork template (SOW FE-13).
+///
+/// -----------------------------------------------------------------------------
+/// The working copy and the published version are not the same row
+/// -----------------------------------------------------------------------------
+/// This row is the **draft**: what the builder opens, autosaves into, and what
+/// `version` counts. What a buyer personalises is `publishedVersion` — an
+/// immutable snapshot in `template_versions`.
+///
+/// Editing a live template therefore cannot change artwork a customer is
+/// halfway through ordering, and publishing is the one deliberate act that
+/// moves them. It is the same reasoning that freezes an order line's price and
+/// an invoice's lines: the moment somebody acts on something, what they acted
+/// on has to stop moving.
+///
+/// -----------------------------------------------------------------------------
+/// Global, like the catalogue it prints onto
+/// -----------------------------------------------------------------------------
+/// Templates are the platform operator's, not a customer's — `TEMPLATE_MANAGE`
+/// is in no customer role. So there is no `accountId` and no row-level
+/// security here; access is decided by the permission on the route and, for
+/// RESTRICTED templates, by `template_account_visibility`. That is the same
+/// shape as Product, and for the same reason.
+model Template {
+  id String @id
+
+  /// Operator-facing code, unique across the platform and upper-cased on write.
+  /// The natural key a designer quotes in a support thread.
+  code        String  @unique
+  name        String
+  description String?
+
+  /// The product this artwork is printed onto.
+  ///
+  /// Print specification — physical bleed, stock dimensions — belongs to the
+  /// *product*, because the same A2 stock has the same 3mm bleed whatever is
+  /// printed on it. The margins held here are the designer's canvas settings,
+  /// which may legitimately be tighter than the stock demands but must never be
+  /// looser; the service checks that on publish.
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id])
+
+  categoryId String?
+  category   ProductCategory? @relation(fields: [categoryId], references: [id])
+
+  status     TemplateStatus     @default(DRAFT)
+  visibility TemplateVisibility @default(ALL_ACCOUNTS)
+
+  theme String?
+
+  orientation TemplateOrientation @default(PORTRAIT)
+  /// Free text ("4:3", "1:1"). A label the storefront prints, not a number
+  /// anything computes with — deriving it from the dimensions would be lossy
+  /// for the sizes that do not reduce cleanly.
+  aspectRatio String?
+
+  widthValue    Decimal               @db.Decimal(10, 3)
+  heightValue   Decimal               @db.Decimal(10, 3)
+  dimensionUnit TemplateDimensionUnit @default(IN)
+  bleedMargin   Decimal               @default(0) @db.Decimal(10, 3)
+  safeMargin    Decimal               @default(0) @db.Decimal(10, 3)
+
+  /// Canvas background — colour, gradient, pattern, backdrop image.
+  canvasConfig Json
+  /// The flat layer list the storefront renders and the customiser drives.
+  /// A field a buyer may change is a layer with `isEditableBySiteUser: true`;
+  /// everything else is locked, which is what makes "personalise" different
+  /// from "redesign".
+  layers Json
+  /// The editor's structured source of truth — groups, masks, gradients,
+  /// filters. `layers` is the flat view derived from it.
+  design Json?
+  /// Fabric.js serialisation, kept so a document saved before `design` existed
+  /// still reopens. Text rather than Json because it is opaque to this system:
+  /// it is only ever handed back to the editor that wrote it, and parsing it
+  /// into jsonb would cost on every read for nothing.
+  canvasJson String?
+
+  /// At most one of each, enforced by the unique constraints. A listing tile
+  /// and a mock-up are singular by nature; anything else is a SOURCE asset.
+  thumbnailAssetId String?        @unique
+  thumbnailAsset   TemplateAsset? @relation("TemplateThumbnail", fields: [thumbnailAssetId], references: [id])
+  previewAssetId   String?        @unique
+  previewAsset     TemplateAsset? @relation("TemplatePreview", fields: [previewAssetId], references: [id])
+
+  /// The draft's revision counter, bumped on every save.
+  ///
+  /// Also the optimistic-concurrency token: a save carrying a stale version is
+  /// refused rather than applied. Two designers with the same template open is
+  /// an ordinary Tuesday, and silently keeping whichever save landed last is
+  /// how an afternoon's work disappears with nothing to show it ever existed.
+  version Int @default(1)
+
+  /// The snapshot buyers render. Null until the template is published once.
+  publishedVersionId String?          @unique
+  publishedVersion   TemplateVersion? @relation("TemplatePublished", fields: [publishedVersionId], references: [id])
+  publishedAt        DateTime?        @db.Timestamptz(3)
+
+  /// Copied in alongside the id, for the same reason the audit log copies an
+  /// actor's name: a designer who leaves must not turn the authorship of every
+  /// template they made into a null.
+  createdById   String?
+  createdBy     User?   @relation("TemplateCreatedBy", fields: [createdById], references: [id])
+  createdByName String?
+  updatedById   String?
+  updatedBy     User?   @relation("TemplateUpdatedBy", fields: [updatedById], references: [id])
+  updatedByName String?
+
+  versions   TemplateVersion[]           @relation("TemplateVersions")
+  assets     TemplateAsset[]             @relation("TemplateAssets")
+  visibleTo  TemplateAccountVisibility[]
+  cartLines  CartLine[]
+  orderLines OrderLineItem[]
+
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @db.Timestamptz(3)
+  /// Soft delete. A template a customer has ordered from is never removed —
+  /// the order's snapshot points at one of its versions.
+  deletedAt DateTime? @db.Timestamptz(3)
+
+  /// The storefront query: published, visible, not deleted, newest first.
+  @@index([status, visibility, deletedAt])
+  @@index([categoryId])
+  @@index([productId])
+  @@map("templates")
+}
+
+/// An immutable snapshot of a template's design at one moment.
+///
+/// Written on every publish, and on demand when a designer wants a restore
+/// point. Never updated — the whole value of the row is that it cannot move
+/// under an order that references it.
+///
+/// The snapshot is the whole design rather than a diff. Diffs are smaller and
+/// are the wrong trade here: reconstructing artwork by replaying a chain means
+/// one corrupt link loses everything after it, and these documents are
+/// kilobytes, not gigabytes.
+model TemplateVersion {
+  id String @id
+
+  templateId String
+  template   Template @relation("TemplateVersions", fields: [templateId], references: [id], onDelete: Cascade)
+
+  /// Matches `Template.version` at the moment the snapshot was taken.
+  version Int
+
+  /// Everything needed to render the template without reading the draft:
+  /// name, dimensions, margins, canvas config, layers, design.
+  snapshot Json
+
+  /// Why this version exists — "Published", "Before the Q4 rebrand".
+  label String?
+
+  createdById   String?
+  createdBy     User?   @relation("TemplateVersionAuthor", fields: [createdById], references: [id])
+  createdByName String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  publishedFor Template? @relation("TemplatePublished")
+
+  /// Why a version is never hard-deleted: baskets and orders point at it.
+  cartLines  CartLine[]
+  orderLines OrderLineItem[]
+
+  @@unique([templateId, version])
+  @@index([templateId, createdAt(sort: Desc)])
+  @@map("template_versions")
+}
+
+/// A file belonging to a template: its tile, its mock-up, or imagery inside it.
+///
+/// The same two-step upload the catalogue uses — presign, upload straight to
+/// storage, then register — because a print-resolution image has no business
+/// passing through this process.
+model TemplateAsset {
+  id String @id
+
+  templateId String
+  template   Template @relation("TemplateAssets", fields: [templateId], references: [id], onDelete: Cascade)
+
+  kind TemplateAssetKind @default(SOURCE)
+
+  /// Object key within the bucket, as built by StorageService.buildKey().
+  storageKey  String @unique
+  filename    String
+  contentType String
+  sizeBytes   Int
+
+  altText String?
+
+  /// Intrinsic pixel size, filled in when derivatives are generated. Lets the
+  /// listing reserve the right box before the image loads, which is what stops
+  /// a gallery reflowing as it fills in.
+  widthPx  Int?
+  heightPx Int?
+
+  /// Resized copies, produced on the RENDER queue exactly as product images
+  /// are. A tile that is a 12MB PNG scaled down in the browser is how a
+  /// gallery of forty templates becomes unusable on a laptop.
+  derivativeStatus DerivativeStatus @default(NOT_APPLICABLE)
+  thumbnailKey     String?
+  previewKey       String?
+  derivativeError  String?
+
+  /// Set when the file came from the DAM rather than a direct upload, so the
+  /// origin of every asset is answerable without guessing from the key.
+  damDocumentId String?
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  thumbnailFor Template? @relation("TemplateThumbnail")
+  previewFor   Template? @relation("TemplatePreview")
+
+  @@index([templateId, kind])
+  @@map("template_assets")
+}
+
+/// Which accounts may see a RESTRICTED template. Ignored for ALL_ACCOUNTS.
+model TemplateAccountVisibility {
+  id String @id
+
+  templateId String
+  template   Template @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([templateId, accountId])
+  @@index([accountId])
+  @@map("template_account_visibility")
 }

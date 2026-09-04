@@ -88,3 +88,25 @@ export const ResetPasswordSchema = z.object({
 });
 
 export type ResetPasswordDto = z.infer<typeof ResetPasswordSchema>;
+
+/**
+ * A signed-in user changing their own password.
+ *
+ * The current password is required even though the caller already holds a
+ * valid access token: a token can have been picked up from a shared machine,
+ * and re-proving the credential is what stops a borrowed session from locking
+ * its owner out. It is deliberately not run through `NewPassword` — the
+ * existing password has to be accepted whatever rules were in force when it
+ * was set.
+ */
+export const ChangePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Enter your current password'),
+    newPassword: NewPassword,
+  })
+  .refine((v) => v.currentPassword !== v.newPassword, {
+    message: 'The new password must be different from the current one',
+    path: ['newPassword'],
+  });
+
+export type ChangePasswordDto = z.infer<typeof ChangePasswordSchema>;

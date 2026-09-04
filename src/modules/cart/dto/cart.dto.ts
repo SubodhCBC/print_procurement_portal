@@ -16,30 +16,62 @@ const Customisation = z
   .record(z.string().max(120), z.union([z.string().max(4000), z.number(), z.boolean(), z.null()]))
   .refine((value) => Object.keys(value).length <= 100, 'At most 100 customisation fields');
 
+/**
+ * The artwork a personalised line was made from.
+ *
+ * Both fields or neither, matching the database's own check. A template id with
+ * no version is a line whose artwork cannot be pinned down — the template is a
+ * moving draft — and a version with no template is a reference with no subject.
+ *
+ * The version comes from `POST /templates/:id/customise`, which is what the
+ * customiser calls before adding to the basket. Sending one the buyer chose
+ * themselves is refused: the service checks it against the template's currently
+ * published version.
+ */
+const templateSelection = {
+  templateId: z.string().trim().min(1).max(64).nullish(),
+  templateVersionId: z.string().trim().min(1).max(64).nullish(),
+};
+
+/** Both set, or both absent. Checked here so a bad request never reaches SQL. */
+const bothOrNeither = (body: {
+  templateId?: string | null;
+  templateVersionId?: string | null;
+}): boolean => (body.templateId == null) === (body.templateVersionId == null);
+
+const PAIRING_MESSAGE =
+  'Send templateId and templateVersionId together, or neither. A template id without a ' +
+  'version does not say which artwork the buyer saw.';
+
 const Quantity = z.coerce.number().int().min(1, 'Quantity must be at least 1').max(10_000_000);
 
-export const AddCartLineSchema = z.object({
-  productId: z.string().trim().min(1, 'A product is required').max(64),
-  /** Required when the product has options; the service checks that. */
-  variantId: z.string().trim().max(64).nullish(),
-  /**
-   * As the buyer typed it. Rounding to the MOQ and order multiple is reported
-   * at validation, not applied here — see the note in the migration.
-   */
-  quantity: Quantity,
-  customisation: Customisation.nullish(),
-  notes: z.string().trim().max(1000).nullish(),
-});
+export const AddCartLineSchema = z
+  .object({
+    productId: z.string().trim().min(1, 'A product is required').max(64),
+    /** Required when the product has options; the service checks that. */
+    variantId: z.string().trim().max(64).nullish(),
+    /**
+     * As the buyer typed it. Rounding to the MOQ and order multiple is reported
+     * at validation, not applied here — see the note in the migration.
+     */
+    quantity: Quantity,
+    ...templateSelection,
+    customisation: Customisation.nullish(),
+    notes: z.string().trim().max(1000).nullish(),
+  })
+  .refine(bothOrNeither, { message: PAIRING_MESSAGE, path: ['templateVersionId'] });
 
 export type AddCartLineDto = z.infer<typeof AddCartLineSchema>;
 
 export const UpdateCartLineSchema = z
   .object({
     quantity: Quantity.optional(),
+    ...templateSelection,
     customisation: Customisation.nullish(),
     notes: z.string().trim().max(1000).nullish(),
   })
-  .refine((value) => Object.keys(value).length > 0, 'Provide at least one field to update');
+  .refine((value) => Object.keys(value).length > 0, 'Provide at least one field to update')
+  .refine(bothOrNeither, { message: PAIRING_MESSAGE, path: ['templateVersionId'] });
 
 export type UpdateCartLineDto = z.infer<typeof UpdateCartLineSchema>;
 
